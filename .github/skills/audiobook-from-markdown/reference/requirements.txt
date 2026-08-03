@@ -1,0 +1,4 @@
+azure-identity>=1.16
+requests>=2.31
+imageio-ffmpeg>=0.5
+mutagen>=1.47
