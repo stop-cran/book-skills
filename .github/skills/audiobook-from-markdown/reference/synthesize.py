@@ -464,6 +464,21 @@ def dry_run_file(stem: str, out_path: Path) -> tuple[int, int]:
 
 # --- input selection -------------------------------------------------------------
 
+def _normalize_input(pattern: str) -> str:
+    """Be forgiving of a path-shaped argument (a natural mistake, since files live under
+    TEXT_DIR with a .md extension) where a bare stem/substring is actually expected --
+    strip a leading TEXT_DIR-name path prefix and a trailing .md suffix if present, so
+    e.g. "text\\03-chapter-3.md" resolves the same as the documented "03-chapter-3"
+    instead of silently building a doubled, nonexistent path (TEXT_DIR/text\\...md.md)."""
+    p = pattern.replace("\\", "/")
+    prefix = f"{TEXT_DIR.name}/"
+    if p.startswith(prefix):
+        p = p[len(prefix):]
+    if p.endswith(".md"):
+        p = p[: -len(".md")]
+    return p
+
+
 def resolve_inputs(args) -> list[tuple[str, Path, int]]:
     """Return (stem, output_mp3, track_number) triples to process."""
     out_dir = Path(args.out_dir)
@@ -471,7 +486,8 @@ def resolve_inputs(args) -> list[tuple[str, Path, int]]:
         stems = NARRATED_STEMS
     else:
         stems = []
-        for pattern in args.inputs:
+        for raw_pattern in args.inputs:
+            pattern = _normalize_input(raw_pattern)
             matches = [s for s in NARRATED_STEMS if pattern in s] or [pattern]
             stems.extend(matches)
     return [(s, out_dir / f"{s}.mp3", NARRATED_STEMS.index(s) if s in NARRATED_STEMS else -1) for s in stems]

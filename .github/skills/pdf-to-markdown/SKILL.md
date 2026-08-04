@@ -17,7 +17,7 @@ for turning a PDF into **clean, verified, per-section Markdown** files, with a
 patch-and-verify loop that makes hand fixes auditable instead of silent, and validation
 passes that catch defects a visual proofread tends to miss.
 
-Worked example this was generalized from: a 143-page scanned Russian book (Propp,
+Worked example this was generalized from: a 147-page scanned Russian book (Propp,
 *Морфология волшебной сказки*) extracted into 17 section files (a preface + 9 chapters + 4
 appendices + 2 reference/bibliography sections), each hand-verified against rendered page
 images where the PDF's text layer was untrustworthy.
@@ -140,6 +140,16 @@ designed so a fix that stops applying is **loud, not silent**:
   `False` (not just a printed diff) precisely so it can double as a hard gate — e.g.
   `if not all(regen_consistency_check(...) for stem in STEMS): sys.exit(1)` in a pre-commit
   hook or CI step, not just something a human might skim past.
+
+**Completion contract** — unlike the AI-authored front-matter workflow in the companion
+`audiobook-from-markdown` skill, this loop's correctness *is* mechanically enforced, by four
+concrete checks acting together (the "matched enforcer" for this whole section, named here
+explicitly rather than left implicit): `check_fix_usage()` (any `STRING_FIXES` entry with a
+zero hit count is a loud warning, not silence), `apply_paragraph_overrides()`'s `ValueError`
+on an ambiguous marker or a reversed range, `regen_consistency_check()`'s `True`/`False`
+return, and `validate_text_quality.py`'s exit code (step 4, below). Treat extraction as
+**not done** until all four are clean for every file — a page that merely "looks right" in
+a spot-check is not the same as passing all four.
 
 ### 4. Validate the result
 
@@ -325,7 +335,32 @@ ideas above, which are unvalidated and shouldn't be mistaken for confirmed gaps)
   real bugs, fixed in commit `e6d86f3` after an external review caught them — if you copied
   the version from `66914f7`, re-copy it.
 
-Feedback: this is a small, personal skill repository (`stop-cran/book-skills`), not a
-maintained product with an SLA — the commit history is the release log. If you copy these
-mechanisms into a project and hit a real bug, or generalize a book-specific fix that looks
-broadly reusable, open an issue or PR there; that's the only feedback channel.
+### Revision history
+
+What each revision closed, so an agent working from a copied `SKILL.md` (no `.git` folder)
+can still tell what's fixed vs. still-known-limited, without needing repo commit access:
+
+- **`66914f7`** (initial) — first published version, generalized from the Propp production
+  run.
+- **`e6d86f3`** — fixed two bugs an external review caught: `validate_text_quality.py`'s
+  default `TEXT_DIR` resolving one level too shallow, and its `main()` always exiting 0
+  regardless of findings; `apply_paragraph_overrides()` silently taking an ambiguous
+  marker's first match instead of rejecting it, and not rejecting a reversed range.
+- **`fd6542b`** — added this Known Limitations section, the Handling Untrusted Content
+  section, and the Worked Example Walkthrough (with real, re-executed command output).
+- **2026-08-04, follow-up revision** — fixed two more bugs a second review round caught:
+  `KNOWN_OK`'s case-sensitive comparison silently failing to suppress the very capitalized
+  proper-noun examples this file documents (now casefolded on both sides), and a
+  self-contradictory page count (143 in the intro vs. 147 here — 147 is the verified figure,
+  measured directly from the source PDF, and is now used consistently). Also named the
+  step-3 "matched enforcer" explicitly and added this revision history.
+
+### Feedback
+
+This is a small, personal skill repository (`stop-cran/book-skills`), not a maintained
+product with an SLA. If you copy these mechanisms into a project and hit a real bug, or
+generalize a book-specific fix that looks broadly reusable, open an issue or PR there.
+**If you're an agent applying this skill and hit a real gap not listed above** — a
+limitation this file doesn't yet document — say so to the user explicitly and offer to file
+it upstream (or add a bullet here if you're working in a fork); don't silently work around
+it and let the gap go unrecorded again.

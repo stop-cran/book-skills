@@ -39,7 +39,9 @@ STEMS = sorted(p.stem for p in TEXT_DIR.glob("*.md")) if TEXT_DIR.exists() else 
 # Proper nouns / domain terms that a general-purpose dictionary won't know, gathered
 # from the book's own front matter (authors, places, discipline-specific jargon).
 # Always book-specific -- start empty and add entries as the spell-check surfaces
-# real (non-typo) unknowns you don't want to keep re-triaging.
+# real (non-typo) unknowns you don't want to keep re-triaging. Case-insensitive
+# (casefolded at comparison time in spell_check()) -- add a name exactly as it
+# appears in the book (e.g. "Пропп"), no need to lowercase it yourself.
 KNOWN_OK: set[str] = set()
 
 # --- 1. invisible / control character scan (language-agnostic) --------------
@@ -139,10 +141,14 @@ SPELLCHECK_BACKENDS = {"ru": _make_spellcheck_ru, "en": _make_spellcheck_en}
 
 
 def spell_check(text: str, is_suspicious) -> Counter:
+    # KNOWN_OK is naturally populated with words as they actually appear in the book
+    # (proper nouns are capitalized, e.g. "Пропп") -- casefold both sides so entries
+    # don't have to be re-typed in lowercase to actually take effect.
+    known_ok_casefolded = {w.casefold() for w in KNOWN_OK}
     words = [w.lower() for w in WORD_RE.findall(text) if len(w) > 2]
     suspicious = Counter()
     for w in words:
-        if w in KNOWN_OK:
+        if w.casefold() in known_ok_casefolded:
             continue
         if is_suspicious(w):
             suspicious[w] += 1
