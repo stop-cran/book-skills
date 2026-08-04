@@ -114,9 +114,11 @@ designed so a fix that stops applying is **loud, not silent**:
   footnote, a wrong word). Literal substring matching (not regex) makes each fix trivially
   auditable — you can see exactly what text it targets. The catch: `str.replace` silently
   does nothing if `old` no longer appears (e.g. because you already re-ran a fix, or an
-  earlier pipeline stage changed) — so every entry's hit count is tracked, and the pipeline
-  prints a loud warning listing any entry that fired zero times across a full run. Comment
-  each entry with *why* (which page, what kind of defect) for future maintainers.
+  earlier pipeline stage changed) — so every entry's hit count is tracked, and
+  `check_fix_usage()` prints a loud warning listing any entry that fired zero times across a
+  full run, and (like `regen_consistency_check()`) returns `True`/`False` rather than just
+  printing, so it too can double as a hard gate. Comment each entry with *why* (which page,
+  what kind of defect) for future maintainers.
 - **`GLOBAL_REGEX_FIXES`** — a list of `(compiled_pattern, replacement)` pairs for
   systematic issues that recur throughout the book (e.g. a middle-dot `·` used as a
   sentence-ending period by the original typesetting, or spaced-out digit groups like
@@ -141,15 +143,35 @@ designed so a fix that stops applying is **loud, not silent**:
   `if not all(regen_consistency_check(...) for stem in STEMS): sys.exit(1)` in a pre-commit
   hook or CI step, not just something a human might skim past.
 
-**Completion contract** — unlike the AI-authored front-matter workflow in the companion
-`audiobook-from-markdown` skill, this loop's correctness *is* mechanically enforced, by four
-concrete checks acting together (the "matched enforcer" for this whole section, named here
-explicitly rather than left implicit): `check_fix_usage()` (any `STRING_FIXES` entry with a
-zero hit count is a loud warning, not silence), `apply_paragraph_overrides()`'s `ValueError`
-on an ambiguous marker or a reversed range, `regen_consistency_check()`'s `True`/`False`
-return, and `validate_text_quality.py`'s exit code (step 4, below). Treat extraction as
-**not done** until all four are clean for every file — a page that merely "looks right" in
-a spot-check is not the same as passing all four.
+**Completion contract** — be precise about which of these four actually enforce themselves.
+Two are unconditional and automatic: `apply_paragraph_overrides()` raises on an ambiguous
+marker or reversed range (the run crashes outright; there's no return value a caller could
+forget to check), and `validate_text_quality.py` (step 4, below) ends the process with a
+non-zero exit code on any finding, which any shell/CI step already treats as failure with no
+extra wiring. The other two — `check_fix_usage()` and `regen_consistency_check()` — are
+hard-gate-*capable*, not hard-gate-automatic: each returns a plain `True`/`False`, but
+nothing blocks unless your own per-book extraction script actually checks it. The **matched
+enforcer** for this section, named explicitly rather than left implicit, is therefore this
+aggregation, added as the last lines of your extraction script (this is the "make it fail
+non-zero" half of the contract):
+
+```python
+ok = check_fix_usage()
+for stem in STEMS:
+    ok = regen_consistency_check(stem, ..., ...) and ok
+if not ok:
+    sys.exit(1)
+```
+
+Until that snippet (or equivalent) is actually present in your script, treat
+`check_fix_usage()`/`regen_consistency_check()` as **self-attended**: their output is
+correct and actionable, but a human or agent has to actually read it — it is not yet
+mechanically blocking anything on its own (this is the honest fallback half of the
+contract). Treat extraction as **not done** until all four are clean for every file, whether
+that's verified mechanically (the snippet above, plus `validate_text_quality.py`'s exit
+code) or self-attended (by actually reading `check_fix_usage()`'s and
+`regen_consistency_check()`'s printed output) — a page that merely "looks right" in a
+spot-check is not the same as passing all four.
 
 ### 4. Validate the result
 
@@ -348,19 +370,35 @@ can still tell what's fixed vs. still-known-limited, without needing repo commit
   marker's first match instead of rejecting it, and not rejecting a reversed range.
 - **`fd6542b`** — added this Known Limitations section, the Handling Untrusted Content
   section, and the Worked Example Walkthrough (with real, re-executed command output).
-- **2026-08-04, follow-up revision** — fixed two more bugs a second review round caught:
-  `KNOWN_OK`'s case-sensitive comparison silently failing to suppress the very capitalized
-  proper-noun examples this file documents (now casefolded on both sides), and a
-  self-contradictory page count (143 in the intro vs. 147 here — 147 is the verified figure,
-  measured directly from the source PDF, and is now used consistently). Also named the
-  step-3 "matched enforcer" explicitly and added this revision history.
+- **`bd3d62b`** — fixed two more bugs a second review round caught: `KNOWN_OK`'s
+  case-sensitive comparison silently failing to suppress the very capitalized proper-noun
+  examples this file documents (now casefolded on both sides), and a self-contradictory page
+  count (143 in the intro vs. 147 here — 147 is the verified figure, measured directly from
+  the source PDF, and is now used consistently). Also named the step-3 "matched enforcer"
+  explicitly and added this revision history.
+- **2026-08-04, second follow-up revision** — a third review round found the step-3
+  completion contract overclaimed: `check_fix_usage()` actually returned `None` (print-only,
+  nothing for a caller to check), and `regen_consistency_check()`'s `True`/`False` return
+  only blocks if the caller checks it — so "mechanically enforced, by four checks acting
+  together" wasn't quite true for two of the four. `check_fix_usage()` now also returns
+  `True`/`False` (mirroring `regen_consistency_check()`), and the completion contract now
+  states plainly which two checks are automatic (`apply_paragraph_overrides()`'s raise,
+  `validate_text_quality.py`'s exit code) versus which two are hard-gate-*capable* but
+  self-attended until your own script aggregates them — with the aggregation snippet given
+  inline. Also broadened the Feedback section's offer-to-file-upstream triggers beyond "an
+  undocumented gap" (user corrections, rule-caused gate failures, manually-resolved source
+  contradictions, user-supplied precedents), with an explicit once-per-session cap.
 
 ### Feedback
 
 This is a small, personal skill repository (`stop-cran/book-skills`), not a maintained
 product with an SLA. If you copy these mechanisms into a project and hit a real bug, or
 generalize a book-specific fix that looks broadly reusable, open an issue or PR there.
-**If you're an agent applying this skill and hit a real gap not listed above** — a
-limitation this file doesn't yet document — say so to the user explicitly and offer to file
-it upstream (or add a bullet here if you're working in a fork); don't silently work around
-it and let the gap go unrecorded again.
+**If you're an agent applying this skill, offer to file it upstream** (or add a bullet here
+if you're working in a fork) — at most once per session, not repeated for every later
+recurrence of the same thing — whenever any of these happen, rather than silently absorbing
+it and letting it go unrecorded: you hit a real gap not listed above; the user corrects
+something this skill produced; a mechanical gate here fails because of the rule itself
+rather than a genuine defect in the content; you had to manually resolve a contradiction in
+the source material (the page-count entry in the revision history above is exactly this);
+or the user hands you a precedent for a case this file doesn't cover.

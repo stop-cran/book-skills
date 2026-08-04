@@ -397,20 +397,31 @@ can still tell what's fixed vs. still-known-limited, without needing repo commit
   only the latter splits).
 - **`fd6542b`** — added this Known Limitations section, the Handling Untrusted Content
   section, and the Worked Example Walkthrough (with real, re-executed command output).
-- **2026-08-04, follow-up revision** — fixed a documented smoke-test command that actually
-  failed as written (`text\03-chapter-3.md` isn't a valid stem/substring argument and
-  produced a doubled, nonexistent path; the doc now shows the correct bare-stem form, and
-  `resolve_inputs()` also now defensively normalizes a path-shaped argument instead of
-  silently mis-resolving it). Added a completion contract for the AI-authored front-matter
-  review step, explicit non-disclosure/no-auth-artifact guidance for that same step, and
-  this revision history.
+- **`bd3d62b`** — fixed a documented smoke-test command that actually failed as written
+  (`text\03-chapter-3.md` isn't a valid stem/substring argument and produced a doubled,
+  nonexistent path; the doc now shows the correct bare-stem form, and `resolve_inputs()`
+  also now defensively normalizes a path-shaped argument instead of silently mis-resolving
+  it). Added a completion contract for the AI-authored front-matter review step, explicit
+  non-disclosure/no-auth-artifact guidance for that same step, and this revision history.
+- **2026-08-04, second follow-up revision** — a third review round's only finding specific
+  to this file's own mechanics (the completion-contract enforcement overclaim) applied to
+  the companion `pdf-to-markdown` skill, not this one; no code change here this round. Did
+  broaden this file's Feedback section's offer-to-file-upstream triggers beyond "an
+  undocumented gap" (user corrections, rule-caused gate failures, manually-resolved source
+  contradictions, user-supplied precedents), with an explicit once-per-session cap, since
+  that wording was shared verbatim with the companion skill.
 
 ### Feedback
 
 This is a small, personal skill repository (`stop-cran/book-skills`), not a maintained
 product with an SLA. If you copy this pipeline into a project and hit a real bug, or
 generalize a book-specific fix that looks broadly reusable, open an issue or PR there.
-**If you're an agent applying this skill and hit a real gap not listed above** — a
-limitation this file doesn't yet document — say so to the user explicitly and offer to file
-it upstream (or add a bullet here if you're working in a fork); don't silently work around
-it and let the gap go unrecorded again.
+**If you're an agent applying this skill, offer to file it upstream** (or add a bullet here
+if you're working in a fork) — at most once per session, not repeated for every later
+recurrence of the same thing — whenever any of these happen, rather than silently absorbing
+it and letting it go unrecorded: you hit a real gap not listed above; the user corrects
+something this skill produced; a mechanical gate here fails because of the rule itself
+rather than a genuine defect in the content; you had to manually resolve a contradiction in
+the source material (as happened with the page-count figure in the companion
+`pdf-to-markdown` skill's revision history); or the user hands you a precedent for a case
+this file doesn't cover.

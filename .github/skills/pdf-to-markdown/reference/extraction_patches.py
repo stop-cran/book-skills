@@ -77,11 +77,17 @@ def apply_fixes(text: str) -> str:
     return text
 
 
-def check_fix_usage() -> None:
+def check_fix_usage() -> bool:
     """Call once after a full extraction run. Warns about any STRING_FIXES entry
     that matched zero times -- almost certainly a fix that silently failed to
     apply and needs investigation, not a fix that's simply no longer needed
-    (if a fix is genuinely obsolete, delete it; don't leave it at zero hits)."""
+    (if a fix is genuinely obsolete, delete it; don't leave it at zero hits).
+
+    Returns True iff every entry fired at least once. As with
+    `regen_consistency_check()`, the return value (not just the printed
+    warning) is what lets a caller turn this into a real hard gate --
+    e.g. `if not check_fix_usage(): sys.exit(1)` -- instead of a message a
+    human might skim past without acting on it."""
     unused = [i for i, n in enumerate(FIX_HIT_COUNTS) if n == 0]
     if unused:
         print(f"WARNING: {len(unused)} STRING_FIXES entries never matched "
@@ -89,8 +95,9 @@ def check_fix_usage() -> None:
         for i in unused:
             old, _ = STRING_FIXES[i]
             print(f"  [{i}] {old[:100]!r}")
-    else:
-        print(f"All {len(STRING_FIXES)} STRING_FIXES entries fired at least once. OK.")
+        return False
+    print(f"All {len(STRING_FIXES)} STRING_FIXES entries fired at least once. OK.")
+    return True
 
 
 # ---------------------------------------------------------------------------
