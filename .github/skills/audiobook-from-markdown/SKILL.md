@@ -66,8 +66,10 @@ and is worth keeping even against a reliable endpoint (it costs nothing when unu
   human-readable title derived from the file's own heading.
 - **Is resumable and supports dry-run/smoke-test workflows**: `--dry-run` writes the
   prepared narration text with zero API calls; `--limit-chunks N` synthesizes only the
-  first N chunks of one file for a quick listen; a full `--all` run skips files whose MP3
-  already exists, so a partial failure just needs a re-run, not a restart from scratch.
+  first N chunks of one file for a quick listen, writing to a distinct `*.smoke.mp3` path
+  that is never tagged and never mistaken for the finished file by a later full run; a full
+  `--all` run skips files whose MP3 already exists, so a partial failure just needs a
+  re-run, not a restart from scratch.
 
 ## What it does NOT do
 
@@ -137,6 +139,16 @@ See `reference/synthesize.py`. Core pieces:
   each half independently, stitching the results with a short silence. Give up and surface
   the error only below a minimum split size (a floor like 60 characters), to avoid infinite
   recursion on a stubbornly-failing tiny fragment.
+- **Split only a genuinely transient failure.** `synth_pcm()` raises one of two distinct
+  exception types, and `synth_pcm_resilient()` only ever splits-and-retries on the first:
+  - `TransientExhaustionError` — every retry attempt got a transient HTTP status
+    (408/429/5xx) from a *reachable* endpoint. Splitting is worth it here: empirically, a
+    different/smaller request often lands on a healthy backend instance.
+  - `PermanentSynthesisError` — bad credentials, a non-transient HTTP status (401/403/400/
+    404/...), an unreachable/misconfigured endpoint, or an unexpected PCM response format.
+    None of these are fixed by making the request smaller, so this propagates immediately
+    instead of being masked behind dozens of doomed split-and-retry calls before the real
+    error finally surfaces.
 
 ### Why split-and-retry, not just more retries
 

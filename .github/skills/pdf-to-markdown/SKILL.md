@@ -54,7 +54,9 @@ images where the PDF's text layer was untrustworthy.
   image-to-text OCR itself.
 - Does **not** guess silently. Every hand-authored fix either visibly fires (tracked hit
   count > 0) or the pipeline warns loudly; every `PARAGRAPH_OVERRIDES`-style structural
-  patch raises an exception if its anchor text isn't found, rather than doing nothing.
+  patch raises an exception if its anchor text isn't found, matches more than one
+  paragraph (ambiguous), or resolves to a reversed range — rather than silently
+  guessing or producing a corrupted splice.
 - Does **not** replace human judgment on genuinely ambiguous glyphs — when a rendered page
   image is itself unclear (poor scan quality), say so and ask, rather than guessing.
 
@@ -111,21 +113,31 @@ designed so a fix that stops applying is **loud, not silent**:
   multi-column case above, or an epigraph that needs to be inserted from a hand transcript).
   Identify the affected range by **marker text** (a substring found in the first and last
   affected paragraph) rather than a paragraph index, since indices shift as earlier fixes
-  change the paragraph count. If either marker isn't found, **raise immediately** — a
-  structural fix silently not applying is much more dangerous than a small string fix not
-  applying, since it can leave garbled multi-paragraph text in the final output.
+  change the paragraph count. **Raise immediately**, rather than guessing, if either marker
+  isn't found, if a marker matches *more than one* paragraph (ambiguous — silently picking
+  the first match could patch the wrong occurrence), or if the resolved range is reversed
+  (end paragraph found before the start paragraph) — a structural fix silently applying to
+  the wrong place is much more dangerous than a small string fix not applying at all, since
+  it can leave garbled or duplicated multi-paragraph text in the final output.
 - **Regen-consistency check.** After *any* change to the extraction logic (not the fix
   tables themselves — the code that walks the PDF), re-run the full extraction and diff the
   new output against the last-known-good `.md` files. An unexplained diff means the code
   change altered something you didn't intend; re-running should be a no-op except for the
   specific fix you just added. This is the single highest-leverage regression check in the
-  whole pipeline, and it's nearly free to run.
+  whole pipeline, and it's nearly free to run. `regen_consistency_check()` returns `True`/
+  `False` (not just a printed diff) precisely so it can double as a hard gate — e.g.
+  `if not all(regen_consistency_check(...) for stem in STEMS): sys.exit(1)` in a pre-commit
+  hook or CI step, not just something a human might skim past.
 
 ### 4. Validate the result
 
-Run `reference/validate_text_quality.py` (works out of the box for the character-hygiene
-pass; needs a one-line language selection for the spell-check pass — see below) over every
-extracted file:
+Run `reference/validate_text_quality.py` (copy it next to your project's `scripts/`
+directory, alongside a sibling `text/` — see the layout note at the top of the script;
+works out of the box for the character-hygiene pass once `TEXT_DIR` resolves correctly,
+needs a one-line language selection for the spell-check pass — see below) over every
+extracted file. It exits non-zero on **any** finding (character-hygiene or spell-check),
+so it doubles as an automation/CI gate — the intended steady state is a clean (exit-0) run
+once real defects are fixed and legitimate rare words are triaged into `KNOWN_OK`:
 
 - **Invisible/control character scan.** Zero-width spaces (U+200B), BOM (U+FEFF), soft
   hyphen (U+00AD), other zero-width joiners, and raw control characters are all invisible on

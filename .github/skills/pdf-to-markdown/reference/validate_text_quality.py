@@ -28,7 +28,10 @@ from pathlib import Path
 # --- configuration: adjust per project -------------------------------------
 
 LANGUAGE = "ru"  # "ru" (morphological, via pymorphy3) or "en" (flat dictionary)
-TEXT_DIR = Path(__file__).resolve().parent / "text"
+# Matches the companion audiobook-from-markdown/reference/synthesize.py convention
+# (REPO_ROOT = parent.parent): this script is meant to be copied into a project's
+# scripts/ subfolder, with text/ as a sibling of that subfolder, not nested inside it.
+TEXT_DIR = Path(__file__).resolve().parent.parent / "text"
 # All .md stems to validate (narrated + reference-only, if any) -- adjust to your
 # project's actual file list.
 STEMS = sorted(p.stem for p in TEXT_DIR.glob("*.md")) if TEXT_DIR.exists() else []
@@ -173,7 +176,10 @@ def main() -> int:
     if LANGUAGE not in SPELLCHECK_BACKENDS:
         print(f"No spell-check backend configured for language={LANGUAGE!r}; "
               f"add one to SPELLCHECK_BACKENDS.")
-        return 0
+        # Exit non-zero: this run did NOT validate spelling, so "no output"
+        # must not be mistaken by a caller/CI for "validated clean".
+        return 1
+
     is_suspicious = SPELLCHECK_BACKENDS[LANGUAGE]()
 
     total_counter: Counter = Counter()
@@ -199,7 +205,13 @@ def main() -> int:
         "dialect/archaic material, and a book's own symbolic notation will all show up "
         "here legitimately. See SKILL.md step 5."
     )
-    return 0
+    # Non-zero on ANY finding (character-hygiene or spell-check), so this is
+    # usable as an automation/CI gate enforcing "zero hits": the intended
+    # steady state is that every real hit gets fixed (STRING_FIXES) or
+    # triaged into KNOWN_OK until a run is clean and exits 0. A hit does NOT
+    # mean "broken" (see the triage reminder above) -- it means "needs a
+    # human/agent decision before this can be called clean".
+    return 1 if (any_char_issue or total_counter) else 0
 
 
 if __name__ == "__main__":

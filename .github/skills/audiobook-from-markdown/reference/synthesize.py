@@ -192,12 +192,31 @@ def build_ssml(text: str, voice: str, rate: str | None) -> str:
     )
 
 
+class PermanentSynthesisError(RuntimeError):
+    """A failure that retrying -- or splitting the text and retrying the
+    pieces -- cannot fix: bad credentials/permissions, a malformed request,
+    an unreachable/misconfigured endpoint, or a response in an unexpected
+    format. synth_pcm_resilient() re-raises these immediately instead of
+    recursively splitting the text: splitting a 401 into smaller 401s just
+    burns API calls and delays the real error surfacing to the user."""
+
+
+class TransientExhaustionError(RuntimeError):
+    """Raised when synth_pcm()'s own retry-with-backoff loop exhausts every
+    attempt on a transient (429/408/5xx) HTTP response from a *reachable*
+    endpoint. This is the ONLY failure synth_pcm_resilient() treats as worth
+    splitting the text and retrying the halves -- see its docstring for why
+    (empirically, a different/smaller request often lands on a healthy
+    backend instance behind the same endpoint, which is not true of a
+    genuinely broken endpoint or bad credentials)."""
+
+
 def _pcm_from_wav(data: bytes) -> bytes:
     with wave.open(io.BytesIO(data), "rb") as wav:
         if (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) != (
             SAMPLE_RATE, 1, SAMPLE_WIDTH,
         ):
-            raise RuntimeError(
+            raise PermanentSynthesisError(
                 f"unexpected PCM format: {wav.getframerate()}Hz "
                 f"{wav.getnchannels()}ch {wav.getsampwidth() * 8}bit"
             )
@@ -219,6 +238,14 @@ def synth_pcm(
     (synth_pcm_resilient) falls back to splitting the text instead of waiting
     here indefinitely, since that has proven the more effective fix (see
     SKILL.md, "Why split-and-retry, not just more retries").
+
+    Raises TransientExhaustionError only when every attempt failed with a
+    transient HTTP status (408/429/5xx) -- the one case worth splitting the
+    text for. Everything else (a non-transient HTTP status such as 401/403/
+    400/404, or a network/connectivity failure such as a bad hostname) raises
+    PermanentSynthesisError instead: a broken endpoint or bad credentials
+    fails identically no matter how small the request is, so splitting the
+    text cannot help and would only multiply doomed calls.
     """
     headers = {
         "Content-Type": "application/ssml+xml",
@@ -228,28 +255,34 @@ def synth_pcm(
     body = ssml.encode("utf-8")
     for attempt in range(max_retries):
         headers["Authorization"] = "Bearer " + get_token()
-        transient = False
-        detail = ""
         try:
             resp = session.post(ENDPOINT, headers=headers, data=body, timeout=180)
         except requests.RequestException as exc:
-            transient, detail = True, f"network error: {exc}"
-        else:
-            if resp.status_code == 200:
-                return _pcm_from_wav(resp.content)
-            transient = resp.status_code in (408, 429, 500, 502, 503, 504)
-            detail = f"{resp.status_code} {resp.text[:300]}"
-            if not transient:
-                raise RuntimeError(f"TTS request failed: {detail}")
-            retry_after = resp.headers.get("Retry-After")
+            # Connectivity-level failure (DNS, refused connection, TLS,
+            # timeout before any response). A couple of retries absorb a
+            # brief blip, but persistent failure here means the endpoint
+            # itself is unreachable/misconfigured, not a single unhealthy
+            # backend instance -- so exhaustion is PermanentSynthesisError,
+            # not the splittable TransientExhaustionError.
+            if attempt == max_retries - 1:
+                raise PermanentSynthesisError(
+                    f"TTS request failed after {max_retries} attempts: network error: {exc}"
+                ) from exc
+            time.sleep(min(2 ** attempt, 12) * (0.8 + 0.4 * random.random()))
+            continue
+        if resp.status_code == 200:
+            return _pcm_from_wav(resp.content)
+        detail = f"{resp.status_code} {resp.text[:300]}"
+        if resp.status_code not in (408, 429, 500, 502, 503, 504):
+            raise PermanentSynthesisError(f"TTS request failed: {detail}")
         if attempt == max_retries - 1:
-            raise RuntimeError(f"TTS request failed after {max_retries} attempts: {detail}")
-        # `retry_after` is only assigned on the HTTP-response path; the
-        # `not detail.startswith("network")` guard must come first so we
-        # never read it on the network-exception path (where it is unset).
-        base = float(retry_after) if (not detail.startswith("network") and retry_after) else min(2 ** attempt, 12)
+            raise TransientExhaustionError(
+                f"TTS request failed after {max_retries} attempts: {detail}"
+            )
+        retry_after = resp.headers.get("Retry-After")
+        base = float(retry_after) if retry_after else min(2 ** attempt, 12)
         time.sleep(base * (0.8 + 0.4 * random.random()))
-    raise RuntimeError("exhausted retries")
+    raise PermanentSynthesisError("exhausted retries")  # unreachable: loop always returns or raises above
 
 
 # Below this length, give up on the split-and-retry fallback and surface the
@@ -280,11 +313,20 @@ def synth_pcm_resilient(
     re-hits the same bad state, but a *different* (smaller) request often
     succeeds, so splitting is a pragmatic, effective workaround regardless of
     the exact root cause.
+
+    Only catches TransientExhaustionError -- deliberately NOT a bare
+    `except Exception`. A permanent failure (bad credentials, an
+    unreachable/misconfigured endpoint, a malformed request, an unexpected
+    response format -- all raised as PermanentSynthesisError) fails exactly
+    the same way no matter how small the request is, so splitting it would
+    just multiply doomed API calls before the real error finally surfaces.
+    PermanentSynthesisError (and anything else unexpected) propagates
+    immediately instead.
     """
     ssml = build_ssml(text, voice, rate)
     try:
         return synth_pcm(ssml, get_token, session, max_retries=max_retries)
-    except Exception:
+    except TransientExhaustionError:
         if len(text) <= MIN_SPLIT_CHARS:
             raise
         sentences = split_sentences(text, LANGUAGE)
@@ -493,19 +535,28 @@ def main() -> int:
     print(f"Synthesizing {len(jobs)} file(s) with {args.voice}\n  endpoint {ENDPOINT}")
     failures: list[str] = []
     for stem, out_path, track in jobs:
-        if out_path.exists() and not args.force and not args.limit_chunks:
-            print(f"  skip (exists): {out_path.name}")
-            tag_mp3(out_path, stem, track, total)
+        # A --limit-chunks smoke test NEVER writes to the canonical out_path:
+        # it writes a distinct *.smoke.mp3 file instead, and is never tagged.
+        # Otherwise a partial recording would land at the exact path the next
+        # full (un-limited) run checks for "already done" and skips -- silently
+        # shipping a truncated file tagged as if it were the complete chapter.
+        target_path = out_path.with_name(f"{out_path.stem}.smoke{out_path.suffix}") if args.limit_chunks else out_path
+        if target_path.exists() and not args.force and not args.limit_chunks:
+            print(f"  skip (exists): {target_path.name}")
+            tag_mp3(target_path, stem, track, total)
             continue
-        print(f"  {stem} -> {out_path.name}")
+        print(f"  {stem} -> {target_path.name}")
         try:
             seconds = synthesize_file(
-                stem, out_path, get_token, args.voice, args.rate,
+                stem, target_path, get_token, args.voice, args.rate,
                 limit_chunks=args.limit_chunks,
             )
-            if not args.limit_chunks:
-                tag_mp3(out_path, stem, track, total)
-            print(f"  done: {out_path.name} ({seconds / 60:.1f} min)")
+            if args.limit_chunks:
+                print(f"  smoke-test output only ({target_path.name}) -- not tagged, "
+                      "not the final file; delete it before a full run if you like")
+            else:
+                tag_mp3(target_path, stem, track, total)
+            print(f"  done: {target_path.name} ({seconds / 60:.1f} min)")
         except Exception as exc:  # keep going; report at the end
             failures.append(f"{stem}: {exc}")
             print(f"  FAILED: {stem}: {exc}")

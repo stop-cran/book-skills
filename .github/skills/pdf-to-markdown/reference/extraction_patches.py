@@ -126,16 +126,38 @@ PARAGRAPH_OVERRIDES: dict[str, list[tuple[str, str, list[str]]]] = {
 
 def apply_paragraph_overrides(stem: str, paragraphs: list[str]) -> list[str]:
     for start_marker, end_marker, replacement in PARAGRAPH_OVERRIDES.get(stem, []):
-        start_i = next((i for i, p in enumerate(paragraphs) if start_marker in p), None)
-        end_i = next((i for i, p in enumerate(paragraphs) if end_marker in p), None)
-        if start_i is None or end_i is None:
-            # Fail LOUD, not silent: an unapplied structural override can leave
-            # multi-paragraph garbled text in the final output, which is a much
-            # worse failure mode than a small string fix silently not firing.
+        start_matches = [i for i, p in enumerate(paragraphs) if start_marker in p]
+        end_matches = [i for i, p in enumerate(paragraphs) if end_marker in p]
+        # Fail LOUD, not silent: an unapplied (or wrongly-applied) structural
+        # override can leave multi-paragraph garbled text in the final
+        # output, which is a much worse failure mode than a small string fix
+        # silently not firing. Three ways this can go wrong, all rejected:
+        #   1. a marker isn't found at all,
+        #   2. a marker is ambiguous (matches more than one paragraph) --
+        #      silently taking the first match risks patching the wrong
+        #      occurrence with no indication anything was wrong,
+        #   3. the resolved range is reversed/empty (end before start) --
+        #      slicing would still "succeed" but silently duplicate or drop
+        #      paragraphs instead of replacing the intended range.
+        if not start_matches or not end_matches:
             raise ValueError(
                 f"paragraph override markers not found for {stem}: "
-                f"start_marker={start_marker!r} (found={start_i is not None}), "
-                f"end_marker={end_marker!r} (found={end_i is not None})"
+                f"start_marker={start_marker!r} (found={len(start_matches)}), "
+                f"end_marker={end_marker!r} (found={len(end_matches)})"
+            )
+        if len(start_matches) > 1 or len(end_matches) > 1:
+            raise ValueError(
+                f"paragraph override markers are ambiguous for {stem}: "
+                f"start_marker={start_marker!r} matched paragraphs {start_matches}, "
+                f"end_marker={end_marker!r} matched paragraphs {end_matches} "
+                "-- use a longer/more specific substring so each marker matches exactly one paragraph."
+            )
+        start_i, end_i = start_matches[0], end_matches[0]
+        if end_i < start_i:
+            raise ValueError(
+                f"paragraph override range is reversed for {stem}: "
+                f"start_marker={start_marker!r} matched paragraph {start_i}, but "
+                f"end_marker={end_marker!r} matched paragraph {end_i}, which comes before it."
             )
         # Preserve any trailing text in the end paragraph that comes after the
         # end_marker -- it belongs to what follows the override, not to it.
@@ -157,13 +179,23 @@ def apply_paragraph_overrides(stem: str, paragraphs: list[str]) -> list[str]:
 # before a final release.
 # ---------------------------------------------------------------------------
 
-def regen_consistency_check(stem: str, new_text: str, known_good_path: str) -> None:
+def regen_consistency_check(stem: str, new_text: str, known_good_path: str) -> bool:
+    """Return True iff `new_text` matches the known-good baseline (or no
+    baseline existed yet, in which case one is written and this run passes
+    trivially). Return False on any diff.
+
+    The return value is what makes this usable as a hard gate, not just a
+    printed diff a human might skim past: call sites that want regen
+    consistency to actually BLOCK (a pre-commit hook, CI, or an agent
+    deciding whether it's safe to overwrite generated output) should check
+    it, e.g. `if not all(regen_consistency_check(...) for stem in STEMS): sys.exit(1)`.
+    """
     import pathlib
     known_good = pathlib.Path(known_good_path)
     if not known_good.exists():
         print(f"[{stem}] no known-good file at {known_good_path} yet -- writing baseline.")
         known_good.write_text(new_text, encoding="utf-8")
-        return
+        return True
     old_text = known_good.read_text(encoding="utf-8")
     if old_text != new_text:
         print(f"[{stem}] DIFFERS from known-good output -- review before overwriting:")
@@ -174,8 +206,9 @@ def regen_consistency_check(stem: str, new_text: str, known_good_path: str) -> N
         )
         for line in list(diff)[:40]:
             print(f"    {line}")
-    else:
-        print(f"[{stem}] unchanged. OK.")
+        return False
+    print(f"[{stem}] unchanged. OK.")
+    return True
 
 
 if __name__ == "__main__":
