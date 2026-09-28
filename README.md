@@ -34,7 +34,8 @@ Russian, or another language with a bit of per-language configuration.
    two independent-model rubber-duck subagents (different vendors, to reduce single-model
    bias) before they're inserted into the narrated text.
 3. Run `audiobook-from-markdown` on the `text/` folder to get tagged `.mp3` files in an
-   `audio/` folder.
+   `audio/` folder. With a new voice or endpoint, first run its `--probe-max-chars` step
+   once: it measures the endpoint's per-request length limit and saves it for later runs.
 
 Each skill is independently useful — you don't need the PDF source to run
 `audiobook-from-markdown` against Markdown you already have, and you don't need to make an
