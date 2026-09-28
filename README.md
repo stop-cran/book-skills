@@ -29,7 +29,10 @@ Russian, or another language with a bit of per-language configuration.
 
 ## Typical workflow
 
-1. Run `pdf-to-markdown` on the source PDF to get validated `.md` files in a `text/` folder.
+1. Run `pdf-to-markdown` on the source PDF to get validated `.md` files in a `text/` folder
+   (for a born-digital HTML/e-text source, see that skill's "Born-digital sources" section —
+   the per-section split and the validation passes still apply; the PDF repair steps mostly
+   don't).
 2. (Optional) Have Copilot CLI draft a short preface and/or per-chapter summaries, reviewed by
    two independent-model rubber-duck subagents (different vendors, to reduce single-model
    bias) before they're inserted into the narrated text.
