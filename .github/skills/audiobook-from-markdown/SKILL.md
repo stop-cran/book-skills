@@ -160,6 +160,45 @@ draft merely exists:
 - The user has seen (or explicitly waived seeing) the final text before a full synthesis
   run consumes API quota/time narrating it.
 
+### Synopsis-only corpus (no original text narrated)
+
+Sometimes the book's own text can't or shouldn't be narrated — it is still under copyright,
+or the user explicitly wants a retelling — so the *whole* narrated corpus is AI-authored.
+There is then no "original text begins here" boundary for a listener to anchor on. The
+steps and the Completion contract above still apply — to **every** file, not only to a
+preface — plus:
+
+- **Disclose up front, audibly and visibly.** Open the first track with a plain spoken
+  statement that the recording is an AI-prepared retelling, not the book's text. Label the
+  album tag as well (e.g. the book title suffixed "— retelling with commentary"), so the
+  label shows in ordinary players, and repeat the statement in an ID3 comment (`COMM`)
+  frame. The reference `tag_mp3()` doesn't write `COMM`, so add it there. Many players never
+  display `COMM`, so it supplements the other two rather than replacing them. If the artist
+  tag keeps the book's author, the album label is what keeps the AI text from being
+  presented as the author's own.
+- **One spoken marker pair per kind of AI content**, not one pair for everything — e.g.
+  «Краткое содержание.» / «Конец краткого содержания.» for the retelling,
+  «Комментарий.» / «Конец комментария.» for the narrator's own commentary, and
+  «Историческая справка.» / «Конец исторической справки.» for background that doesn't
+  come from the book at all. In code, generalize `SUMMARY_MARKERS` into a table of marker
+  phrases. Optionally emit a paragraph that exactly equals a marker phrase as its own
+  `Segment` kind with its own `DEFAULT_PAUSES` entry (~900 ms worked by ear);
+  `chunk_segments()` applies a kind's pause *before* its chunk, so this lengthens the pause
+  before each marker, not after it.
+- **Check closeness to the source both mechanically and by review.** A word-n-gram
+  comparison of each draft against the source text (e.g. 7-word shingles after
+  lowercasing, normalizing letter variants such as ё→е, and stripping page markers)
+  catches copied wording: rewrite any long shared run that isn't a set phrase (a name, a
+  date, a unit designation). It does **not** catch close paraphrase, or a retelling that
+  follows the source's sentence structure and order — ask both reviewers to flag that
+  explicitly. Neither check is a legal test. Keep the source cache out of the deliverable.
+
+Exercised once: an 18-track, ~3.4-hour Russian retelling-with-commentary audiobook of a
+memoir whose own text couldn't be narrated. After listening, the user singled out the
+audible captions and fragment start/end markers as working well; in review, both vendors'
+reviewers flagged passages as too close to the source in word order or structure, the
+kind of closeness an exact-n-gram check isn't designed to detect.
+
 ## Chunking (language-agnostic core, per-language label list)
 
 See `reference/chunk_text.py`. The algorithm (keep whole paragraphs when they fit under
@@ -484,9 +523,10 @@ ideas above, which are unvalidated and shouldn't be mistaken for confirmed gaps)
   players; it hasn't been checked against a player that only understands ID3v2.4 framing or
   against embedded cover art.
 - The two audible-navigation conventions (spoken heading, AI-summary markers) were
-  validated by ear on one Russian audiobook; a language with very different prosody norms
-  might need a different marker phrase than a literal translation of "Summary." / "End of
-  summary."
+  validated by ear on two Russian audiobooks — the second a synopsis-only corpus with three
+  marker pairs (retelling / commentary / background; see "Synopsis-only corpus" above); a
+  language with very different prosody norms might need a different marker phrase than a
+  literal translation of "Summary." / "End of summary."
 
 ### Revision history
 
@@ -523,6 +563,12 @@ can still tell what's fixed vs. still-known-limited, without needing repo commit
   413 now splits; a read timeout or dropped response is now transient. `chunk_text.py`'s `DEFAULT_BUDGET` is now
   marked as a default only. Added `reference/test_synthesize.py` (offline tests, including a
   check of the worked example). If you copied `synthesize.py` before this, re-copy it.
+- **2026-09-28, synopsis-only corpus** — a run whose whole narrated corpus was an AI
+  retelling (the book's own text couldn't be narrated) found guidance only for a summary
+  that precedes the original text. Added "Synopsis-only corpus": up-front disclosure
+  (spoken, album tag, `COMM` frame), one spoken marker pair per kind of AI content, and a
+  closeness-to-source check by n-gram and by review. Updated the audible-navigation bullet
+  in Known limitations. No code change.
 
 ### Feedback
 
