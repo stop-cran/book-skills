@@ -1,10 +1,11 @@
 """Split cleaned narration segments into TTS-sized chunks.
 
-Real-time TTS endpoints typically cap each request at a few thousand characters
-and/or several minutes of audio, so long paragraphs must be split -- but *never*
-mid-sentence, which corrupts intonation. This module keeps whole paragraphs
-together when they fit under a conservative budget, and otherwise splits them at
-sentence boundaries, packing sentences greedily.
+Real-time TTS endpoints cap each request (see DEFAULT_BUDGET below), so long
+paragraphs must be split -- at sentence boundaries, since a cut mid-sentence
+corrupts intonation. This module keeps whole paragraphs together when they fit
+under the budget, and otherwise splits them at sentence boundaries, packing
+sentences greedily; only a single sentence longer than the budget is cut, at a
+word boundary (mid-word only for a word longer than the budget).
 
 Each Chunk carries a pre_pause_ms hint so the synthesizer can insert a natural
 silence before it (longest before a section title, medium before an
@@ -23,9 +24,11 @@ from dataclasses import dataclass
 
 from clean_text import Segment
 
-# Conservative budget: keep well under the endpoint's hard character limit --
-# a budget-sized chunk is still only a couple of minutes of audio, leaving
-# headroom for the duration cap too.
+# Default only: the real per-request limit depends on the voice/model and
+# endpoint (on one preview voice no chunk under 600 chars needed a split, and
+# most chunks of 600+ did). `synthesize.py --probe-max-chars` measures it and
+# saves it to tts-limits.json, which every later run uses (`--max-chars`
+# overrides it) -- don't edit this constant instead.
 DEFAULT_BUDGET = 1800
 
 DEFAULT_PAUSES = {
@@ -131,7 +134,9 @@ def _hard_split(text: str, budget: int) -> list[str]:
 
 
 def split_paragraph(text: str, budget: int = DEFAULT_BUDGET, language: str = "ru") -> list[str]:
-    """Split one paragraph into <=budget parts without breaking sentences."""
+    """Split one paragraph into <=budget parts at sentence boundaries; a single
+    sentence over budget is cut at a word boundary, or mid-word for a word over
+    budget (_hard_split)."""
     if len(text) <= budget:
         return [text]
     parts: list[str] = []

@@ -5,8 +5,9 @@ description: >-
     Azure neural TTS (MAI-Voice-2 or similar). Use when the user wants to narrate a book,
     split narration into per-chapter/section audio files, add ID3 tags for audio-player
     navigation (artist/album/year/track number/title), handle a flaky preview TTS
-    endpoint reliably, or add spoken navigation cues (chapter headings, AI-summary
-    boundaries) so listeners can navigate by ear.
+    endpoint reliably (including long requests that keep failing: measure and save the
+    endpoint's per-request length limit), or add spoken navigation cues (chapter headings,
+    AI-summary boundaries) so listeners can navigate by ear.
 user-invocable: true
 ---
 
@@ -45,8 +46,10 @@ and is worth keeping even against a reliable endpoint (it costs nothing when unu
   needing to look at the player. Do **not** rely on a pause alone for this; a TTS pause and
   a chapter/paragraph pause sound alike, so an explicit spoken marker is what actually
   removes the ambiguity.
-- **Chunks text to fit the endpoint's per-request limits** (character count and audio
-  duration), splitting **only at sentence boundaries** — never mid-sentence, which corrupts
+- **Chunks text to fit the endpoint's per-request limit** (a character count, measured per
+  voice and endpoint — see "Measuring the request limit"), splitting paragraphs **at
+  sentence boundaries** (only a sentence longer than the limit is cut, at a word boundary,
+  by `_hard_split()`) — never elsewhere mid-sentence, which corrupts
   intonation — using a per-language abbreviation/label list so `"см. гл. VII"` or
   `"Dr. Smith"` isn't mistaken for three sentence ends.
 - **Synthesizes losslessly and gaplessly**: each chunk becomes PCM (not compressed audio),
@@ -160,7 +163,8 @@ draft merely exists:
 ## Chunking (language-agnostic core, per-language label list)
 
 See `reference/chunk_text.py`. The algorithm (keep whole paragraphs when they fit under
-budget; otherwise split at sentence boundaries; pack sentences greedily) is
+budget; otherwise split at sentence boundaries; pack sentences greedily; split a single
+over-budget sentence at a word boundary) is
 language-agnostic. What's language-specific is exactly which trailing-period tokens do
 **not** end a sentence — supply your own list via `LANGUAGE_ABBREVIATIONS`:
 
@@ -188,21 +192,26 @@ See `reference/synthesize.py`. Core pieces:
   each half independently, stitching the results with a short silence. Give up and surface
   the error only below a minimum split size (a floor like 60 characters), to avoid infinite
   recursion on a stubbornly-failing tiny fragment.
-- **Split only a genuinely transient failure.** `synth_pcm()` raises one of two distinct
-  exception types, and `synth_pcm_resilient()` only ever splits-and-retries on the first:
+- **Split only a failure a smaller request can fix.** `synth_pcm()` raises one of two distinct
+  exception types, and `synth_pcm_resilient()` splits-and-retries on the first, and on the
+  second only for a 413:
   - `TransientExhaustionError` — every retry attempt got a transient HTTP status
-    (408/429/5xx) from a *reachable* endpoint. Splitting is worth it here: empirically, a
-    different/smaller request often lands on a healthy backend instance.
+    (408/429/500/502/503/504), a read timeout or a dropped response from a *reachable*
+    endpoint. Splitting is
+    worth it here: empirically, a different/smaller request often lands on a healthy
+    backend instance.
   - `PermanentSynthesisError` — bad credentials, a non-transient HTTP status (401/403/400/
-    404/...), an unreachable/misconfigured endpoint, or an unexpected PCM response format.
-    None of these are fixed by making the request smaller, so this propagates immediately
-    instead of being masked behind dozens of doomed split-and-retry calls before the real
-    error finally surfaces.
+    404/...), an unreachable/misconfigured endpoint (including a connect timeout), or a
+    response that isn't the expected WAV/PCM. None of these are fixed by making the request
+    smaller, so this propagates immediately instead of being masked behind dozens of doomed
+    split-and-retry calls before the real error finally surfaces. The exception is a 413
+    (payload too large), which a shorter request does fix, so it is split.
 
 ### Why split-and-retry, not just more retries
 
-Against a flaky preview endpoint, failures were empirically **not correlated with text
-length or specific content** — the exact same short chunk could fail repeatedly while an
+In the first production run, failures against a flaky preview endpoint were empirically
+**not correlated with text length or specific content** — the exact same short chunk could
+fail repeatedly while an
 isolated hand-typed short phrase of similar length always succeeded, and bisecting a
 reliably-failing paragraph down to under 100 characters didn't reveal a specific triggering
 character or construct. That pointed to backend-instance-level flakiness (which request
@@ -214,6 +223,56 @@ run (many chunks needed 1-4 rounds of splitting). If your endpoint instead fails
 deterministically on specific content (same input always fails, isolated or not), that's a
 different problem — a real content/SSML trigger — and needs a targeted fix in the cleaner,
 not more retrying.
+
+**But a length limit also exists, and it depends on the voice/model and endpoint.** A later
+run on the same voice, with the default 1800-character budget, got a repeatable 502
+(`upstream connect error or disconnect/reset before headers. reset reason: protocol error`)
+on most chunks over ~600 characters and almost none under that; it may be an audio-duration
+limit rather than a character count. Split-and-retry still delivered every chunk, but spent
+most of the run doing it. So the limit is measured once and saved (next section);
+split-and-retry stays as the backstop for the fuzzy edge.
+
+### Measuring the request limit (`--probe-max-chars`)
+
+Before the first batched run with a voice and endpoint, run `python synthesize.py
+--probe-max-chars`, passing the same `--voice`, `--rate` and endpoint as the real runs.
+
+- **What it sends.** Word-aligned prefixes of your own narrated text (titles excluded),
+  taken from the files you name in order (default: all), at rising lengths — 400 … 1800
+  characters, or the comma-separated `--probe-lengths` you pass. Each length gets up to two
+  attempts, each a single request (no retries, no splitting). The header names the files the
+  text came from.
+- **What counts as failing at a length.** A 408/500/502/503/504, a read timeout or dropped
+  response, a 200 whose WAV holds no audio, a 413, or a 400 once a shorter length has passed. At the first failure the probe
+  stops and re-sends the longest passing text once, to check the endpoint still works there.
+- **What it saves.** 90% of the longest length that passed every attempt, because near the
+  limit failures are intermittent and a length can pass both attempts by chance. It goes to
+  `tts-limits.json` in the project root (the folder above `reference\`), keyed by voice,
+  endpoint (an 8-hex-digit hash of its URL) and `--rate`. The file holds voice names, hashes
+  and numbers, no secrets: commit it, or re-probe on each machine. Re-probing replaces the
+  entry and prints the old value. Run one probe at a time.
+- **When it saves nothing.** The shortest length failed, or the re-check failed too
+  (failures aren't tied to length right now): exit 1. Every length passed: exit 0, no limit
+  found. Any other error — a 429, a 401/403/404, a network error, a 400 at the shortest
+  length, a 200 that isn't WAV at all — stops the probe with `an error that isn't about
+  length`: exit 1. See Troubleshooting for each. In every case, a valid limit saved earlier
+  for this voice, endpoint and rate stays in effect; a bad entry keeps stopping runs until
+  you fix or delete it.
+- **How runs use it.** Every later run with the same voice, endpoint and rate — dry run,
+  smoke test and full batch — reads the saved limit and prints it with its source in the
+  header, `max <N> chars (tts-limits.json, probed <date>)`, so the chunks you inspect are the
+  chunks you synthesize. `--max-chars N` or `$env:TTS_MAX_CHARS` override it. With neither
+  and no saved entry, runs use `DEFAULT_BUDGET` (1800): a real run warns, and a dry run's
+  header shows `(default)` (or, with no endpoint set, that it couldn't look the entry up).
+  Don't edit `DEFAULT_BUDGET` to change the limit.
+- **The guard.** A real run refuses to start, before logging in or sending anything, if a
+  chunk it is about to send is longer than the limit. Paragraphs are always split to fit,
+  so only a title can trip it (see Troubleshooting).
+- A longer probe also adds words, so if the failing length is well below where your run's
+  long chunks started failing, probe another file with the same `--probe-lengths`. If that
+  one passes and a re-probe of the first still fails at the same length, suspect a content
+  trigger in the first file's text (see "Why split-and-retry"); one pass alone could just be
+  the intermittent edge.
 
 ## Worked example walkthrough
 
@@ -241,7 +300,7 @@ saved as `text/01-glava-1.md`:
 running `python synthesize.py --dry-run 01-glava-1` prints:
 
 ```
-Dry run -- 1 file(s), endpoint (unset -- set $TTS_RESOURCE for a real run), voice ru-RU-Lev:MAI-Voice-2
+Dry run -- 1 file(s), endpoint (unset -- set $TTS_RESOURCE for a real run), voice ru-RU-Lev:MAI-Voice-2, max 1800 chars (default; no endpoint set, so tts-limits.json wasn't checked)
   01-glava-1: 7 chunks, 392 chars  ->  01-glava-1.txt
 
 Totals: 1 files, 7 chunks, 392 chars
@@ -283,7 +342,11 @@ Three things worth noticing, all directly verifiable from this output:
   keeping the cross-reference intact instead of fragmenting it right after "см."
 
 For a real (non-dry-run) synthesis of this same file:
-`$env:TTS_RESOURCE = "<your-resource>"; python synthesize.py 01-glava-1`.
+`$env:TTS_RESOURCE = "<your-resource>"; python synthesize.py 01-glava-1`. With the endpoint
+set, the header shows the limit `--probe-max-chars` saved for this voice, endpoint and rate
+(`max <N> chars (tts-limits.json, probed <date>)`), or before any probe `(default)` and a
+warning; this example's paragraphs are all under 200 characters, so its chunks stay the same
+with any limit above that. `reference\test_synthesize.py` checks the output above.
 
 ## ID3 tagging convention
 
@@ -304,16 +367,27 @@ az login                              # need "Cognitive Services Speech User" on
 
 $env:TTS_RESOURCE = "<your-foundry-resource-name>"   # or $env:TTS_ENDPOINT for a full URL
 
+python synthesize.py --probe-max-chars            # once per voice + endpoint + --rate: saves
+                                                   #   the request limit to tts-limits.json
 python synthesize.py --dry-run --all              # inspect prepared text, zero API calls
 python synthesize.py 03-chapter-3 --limit-chunks 2  # smoke test one file (bare STEM --
                                                      #   no text\ prefix, no .md suffix)
 python synthesize.py --all                         # full batch -> audio\*.mp3
 ```
 
-`--dry-run` needs no endpoint. A real run resumes automatically (skips existing MP3s);
-add `--force` to re-render. Always smoke-test one small file end-to-end (including a
-listen) before committing to a full multi-hour batch run — this is the cheapest point to
-catch a wrong voice, wrong language tag, or bad pacing.
+The narrated files are `text\*.md` in the project root (the folder above `reference\`);
+`tts-limits.json` and `audio\` go there too. Pass the same `--voice`, `--rate` and endpoint
+to the probe and to every run (`$env:TTS_VOICE` sets the voice for all of them): the saved
+limit applies only to that combination, and any other one has its own entry, or none until
+it is probed. Set the endpoint before a dry run too, so it
+reads the saved limit and shows the chunks the real run will send; `--dry-run` itself sends
+nothing and needs no login. A real run resumes automatically (skips existing MP3s); add
+`--force` to re-render. `--max-chars N` or `$env:TTS_MAX_CHARS` override the saved limit for
+a run; "Measuring the request limit" has the details. Always smoke-test one small file
+end-to-end (including a listen) before committing to a full multi-hour batch run — this is
+the cheapest point to catch a wrong voice, wrong language tag, or bad pacing. After editing
+or re-copying `synthesize.py`, run `python test_synthesize.py` in `reference\`: offline
+tests of the limit, the probe and the guard, with no endpoint or login.
 
 Inputs are matched as **bare stems or substrings** against `NARRATED_STEMS` (e.g.
 `03-chapter-3`, or a shorter unique substring like `chapter-3`) — not a relative path and
@@ -334,15 +408,38 @@ documented, unambiguous form.
   has no custom domain configured.
 - **404** — the AAD real-time TTS path is `/tts/cognitiveservices/v1`, not
   `/cognitiveservices/v1`.
-- **Transient 502/503 on varying chunks, not always the same one** — this is the flaky-
-  backend-instance case; confirm `synth_pcm_resilient` is wired in (not just `synth_pcm`
-  directly) and let it split-and-retry.
+- **Transient 408/500/502/503/504 on varying chunks, not always the same one** — this is the
+  flaky-backend-instance case; confirm `synth_pcm_resilient` is wired in (not just
+  `synth_pcm` directly) and let it split-and-retry. If it is mostly the *long* chunks, see
+  the next entry.
+- **Nearly every chunk above some length fails, and shorter ones almost never do** — a
+  length limit, not random flakiness (seen once as a repeatable `502 … protocol error` on
+  a preview voice, above ~600 characters).
+  Split-and-retry still gets through, slowly. Run `--probe-max-chars` for this voice,
+  endpoint and rate; it saves the limit to `tts-limits.json` and later runs pick it up (see
+  "Measuring the request limit").
+- **`The probe stopped on an error that isn't about length`** — the probe got a response a
+  shorter request wouldn't fix. A 429 (throttled): wait a few minutes and probe again. A
+  401/403/404: see the entries above. A network error: check the resource name (its custom
+  domain) or the `--endpoint` URL, and any proxy or VPN. `response is not a WAV file`: the
+  URL answered but isn't the TTS path (see 404). A 400 at the shortest length: check the
+  voice name and `XML_LANG` (a 400 counts as a length failure only after a shorter length
+  passed). Nothing is saved.
+- **`The shortest probe (N chars) failed`** — either the limit is below the shortest probe
+  (probe shorter lengths, e.g. `--probe-max-chars --probe-lengths 100,200,300`) or requests
+  are failing at any length right now: probe again later. Nothing is saved.
+- **`failures aren't tied to length right now`** — after a failure, the probe re-sent the
+  longest length that had passed, and it failed too. Nothing is saved; probe again later.
+- **`chunk(s) exceed the N-char request limit`** — a title (headings are never split) is
+  longer than the limit; shorten that heading in `text\` (this also changes that file's ID3
+  title). Don't raise `--max-chars` above the probed limit: the longer requests would fail.
 - **The exact same chunk 502s every single run, never any other chunk** — a genuine
   content/SSML trigger, not infra flakiness (e.g. a raw pipe-dense Markdown table row
   reaching the endpoint unstripped). Inspect that chunk's dry-run text and add a targeted
   cleaner rule; splitting won't fix a deterministic trigger, only bad luck.
-- **Robotic pacing** — a paragraph split badly; confirm the chunker only splits at
-  sentence boundaries, or add a `--rate` adjustment.
+- **Robotic pacing** — a paragraph split badly; confirm the chunker splits only at
+  sentence boundaries (except a single sentence longer than the limit, split at a word
+  boundary), or add a `--rate` adjustment.
 - **`ffmpeg failed`** — reinstall `imageio-ffmpeg` (bundled binary, no system install
   needed).
 
@@ -364,16 +461,25 @@ documented, unambiguous form.
 These are **grounded** — established by actual use, not speculation (unlike the candidate
 ideas above, which are unvalidated and shouldn't be mistaken for confirmed gaps):
 
-- The resilient split-and-retry pattern was validated against exactly one flaky *preview*
-  Azure AI Foundry TTS endpoint, across one production run producing 15 files totaling
-  ~6.5 hours of finished audio. It hasn't been exercised against other TTS vendors' failure
+- The resilient split-and-retry pattern was validated against a flaky *preview* Azure AI
+  Foundry TTS endpoint (voice `ru-RU-Lev:MAI-Voice-2`), across two production runs — 15
+  files totaling ~6.5 hours of finished audio, then 18 files totaling ~3.4 hours, the
+  second with a length threshold (see "Why split-and-retry"); whether both runs used the
+  same resource wasn't recorded. It hasn't been exercised against other TTS vendors' failure
   modes, and a chunk that fails *deterministically regardless of split size* is a different
   bug class (see Troubleshooting) that splitting cannot fix — don't assume splitting is a
   universal remedy for every synthesis failure.
-- `synth_pcm_resilient()` only treats `TransientExhaustionError` as worth splitting, as of
-  commit `e6d86f3` (an external review caught the prior version splitting on *any*
-  exception, including permanent auth/endpoint/format failures) — if you copied the version
-  from `66914f7`, re-copy it.
+- `--probe-max-chars` was checked end to end on that preview voice and one endpoint, in two
+  sessions: 700 characters failed with the same 502 each time (the longest lengths probed
+  below it passed), and smoke tests at the saved limit then ran with no failure or split.
+  The 90% margin and the two attempts per length are provisional, set from those runs;
+  another voice or vendor may need a wider margin. The limit is a character count, but the
+  real one may be audio duration, so a much slower `--rate` or denser text could still hit
+  it; split-and-retry covers that.
+- `synth_pcm_resilient()` splits only on failures a smaller request can fix (see "Synthesis
+  and the resilient split-and-retry pattern"), as of commit `e6d86f3` (an external review caught the prior version
+  splitting on *any* exception, including permanent auth/endpoint/format failures) — if you
+  copied the version from `66914f7`, re-copy it.
 - ID3 tagging was validated with `mutagen`'s ID3v2.3 writer against common desktop/mobile
   players; it hasn't been checked against a player that only understands ID3v2.4 framing or
   against embedded cover art.
@@ -410,6 +516,13 @@ can still tell what's fixed vs. still-known-limited, without needing repo commit
   undocumented gap" (user corrections, rule-caused gate failures, manually-resolved source
   contradictions, user-supplied precedents), with an explicit once-per-session cap, since
   that wording was shared verbatim with the companion skill.
+- **2026-09-28, request-length limit** — a production run spent most of its time on chunks
+  over an undocumented length limit (see "Why split-and-retry"). Added `--probe-max-chars`,
+  which measures the limit and saves it to `tts-limits.json` per voice, endpoint and rate;
+  every run now reads it, prints it with its source and refuses to send a chunk over it. A
+  413 now splits; a read timeout or dropped response is now transient. `chunk_text.py`'s `DEFAULT_BUDGET` is now
+  marked as a default only. Added `reference/test_synthesize.py` (offline tests, including a
+  check of the worked example). If you copied `synthesize.py` before this, re-copy it.
 
 ### Feedback
 
