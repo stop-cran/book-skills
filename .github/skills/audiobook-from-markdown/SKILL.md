@@ -150,7 +150,16 @@ draft merely exists:
 
 - Both reviewer subagents actually ran, each in its own clean/independent context (verify
   this wasn't skipped or short-circuited into "review it yourself instead"), and were
-  genuinely two different model vendors, not two configurations of the same one.
+  genuinely two different model vendors, not two configurations of the same one. A reviewer
+  that errors out before producing a verdict (e.g. fails at startup with zero turns) did
+  **not** run. Retry it once — a trimmed request, or another model from the same vendor, is
+  fine (a `400 invalid request body` can come from the request, not the vendor). If it
+  still fails, substitute an available model from a vendor other than the one that already
+  reviewed — never a second model from that vendor — and if the user named specific
+  reviewer models, ask before substituting. Record the failed model, its error, and its
+  replacement where the user can see it, as with reconciliation decisions below. If no
+  second vendor is available at all, stop and tell the user rather than proceeding on one
+  vendor's review, unless the user explicitly waives the second review.
 - Both reviewers' verdicts were read and reconciled into the draft — either the feedback
   was applied, or a specific reason it wasn't (per point 3) is recorded somewhere the user
   can see, not silently dropped.
@@ -569,6 +578,11 @@ can still tell what's fixed vs. still-known-limited, without needing repo commit
   (spoken, album tag, `COMM` frame), one spoken marker pair per kind of AI content, and a
   closeness-to-source check by n-gram and by review. Updated the audible-navigation bullet
   in Known limitations. No code change.
+- **2026-09-28, reviewer vendor fallback** — in a run, every model tried from one of the
+  two planned reviewer vendors failed at startup, and the Completion contract said nothing
+  about a reviewer that can't run. It now says such a reviewer didn't run, allows one retry,
+  then requires a model from a different vendor (asking first if the user named the
+  reviewers), a visible record of the swap, and a stop if no second vendor is available.
 
 ### Feedback
 
