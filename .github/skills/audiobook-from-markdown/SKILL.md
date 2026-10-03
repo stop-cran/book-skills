@@ -18,8 +18,10 @@ Do not describe a dry run, smoke file, or merely existing MP3 as a finished audi
 
 **Enforcers:** `book_project.read_project()` validates configuration and selection;
 `synthesize.py` checks request sizes, source/settings/audio hashes, and completion
-manifests. Human approval and listening are **reviewer-checked**, not certified by
-those mechanical checks. Tests cannot certify pronunciation or philosophical fidelity.
+manifests. `workflow.py` rechecks frozen narration plans, selects exact preview passages,
+and verifies complete albums with metadata and full decoding. Human approval and listening
+are **reviewer-checked** declarations, not certified by those mechanical checks.
+Tests cannot certify pronunciation or philosophical fidelity.
 
 This skill owns the reusable cleaner, chunker, Azure transport, probe, PCM cache,
 single-encode MP3 production, tagging, and provenance. Each book owns its source
@@ -41,18 +43,25 @@ installation. Run one process per output directory and one probe per limits file
 4. Resolve the user's Azure resource and verify the voice is available. Use
    `--probe-max-chars` with the same voice, rate, endpoint, and source selection as
    the real run. Re-run dry preparation at the resulting limit.
-5. Render a short `--limit-chunks N` preview and have someone **listen**. If the agent
-   has no audio perception, say so and ask the user to review the local preview;
-   checking an MP3 header or speech-to-text output is not listening.
+5. Save a run plan with `workflow.py plan`. Select representative passages with
+   `workflow.py preview --dry-run`: the opening and complete examples of the difficult
+   features actually present, such as a diagram or formula. Inspect the selected text
+   before rendering those samples and having someone **listen**. The older
+   `--limit-chunks N` selects only an opening, not arbitrary technical passages.
+   If the agent has no audio perception, say so and ask the user to review the local
+   preview; checking an MP3 header or speech-to-text output is not listening.
 6. Once the requested scope and preview are approved, render the batch. This is a
    quota-consuming external action; approval may cover the whole validated batch.
    A source/voice/rate change requires a fresh preparation/preview, not a silent switch.
-7. Verify the exact expected track set, manifests, metadata, duration, and full MP3
-   decoding. Keep audio, PCM caches, and transcripts outside Git. Publishing a release
-   or uploading recordings is separate from rendering and needs authorization.
+7. Run `workflow.py verify` against that plan: exact expected track/manifest sets,
+   metadata, duration, and full MP3 decoding must pass. Keep audio, PCM caches,
+   transcripts and run records outside Git. Publishing a release or uploading
+   recordings is separate from rendering and needs authorization.
 
-Preparation writes local transcripts only. Probing and synthesis send narration to
-Azure and consume quota. `--force` replaces selected output while retaining verified
+Renderer dry preparation writes local transcripts; workflow planning and preview
+dry-runs update local run records. Preview `--dry-run` means no synthesis, not no state
+change: adding a sample also clears prior approval. Probing and synthesis send narration
+to Azure and consume quota. `--force` replaces selected output while retaining verified
 PCM checkpoints. Add `--refresh-cache` only when explicitly repeating TTS is intended;
 it requires `--force`. Without replacement authorization, stale or unverified output stops before login.
 
@@ -119,7 +128,9 @@ actual ordered segments and chunks.
 
 ## Commands
 
-From the book directory in PowerShell:
+Low-level renderer commands, from the book directory in PowerShell. For the recommended
+plan/representative-preview/approval/render/verify sequence, use the companion workflow
+below; the opening-only smoke command here does not record that evidence.
 
 ```powershell
 $engine = Join-Path $env:BOOK_SKILLS_ROOT '.github\skills\audiobook-from-markdown\reference\synthesize.py'
@@ -149,6 +160,82 @@ inputs are mutually exclusive. `--rate=-5%` uses `=` because argparse otherwise 
 the negative value as another flag.
 Fallback display-track ordinals for unnumbered files never satisfy a numeric chapter
 range. An explicitly configured numeric output alias does.
+
+### Durable plans, representative previews, and verification
+
+`workflow.py` is a companion, not a second renderer. It imports the shared engine
+without changing its four hashed files, so workflow-only fixes do not invalidate
+existing recordings or PCM caches. Use one writer per output directory.
+
+For the worked example's `book.json` and `audio` output directory, after probing:
+
+```powershell
+$workflow = Join-Path (Split-Path $engine) 'workflow.py'
+$resource = '<your-resource>'
+$run = '.\audio\example.run.json'
+python $workflow plan --project .\book.json --resource $resource --record $run --all
+python $workflow preview --record $run --resource $resource --name opening --stem 01-glava-1 --chunks 1-4 --dry-run
+```
+
+The plan stores source/profile/renderer hashes, exact stem/path identities and settings, and
+every ordered `[text, pause_ms, kind]` chunk. Inspect it alongside the dry-run transcripts.
+Configured aliases sharing a source retain their own section selection and track order.
+`plan` sends no requests; it refuses to overwrite an existing record. Use a new
+`*.run.json` name inside the output directory for a revised run.
+
+Preview selectors are **1-based, inclusive complete chunks**: `--chunks 3-8`, or
+`--from-text '<unique prepared phrase>' --through-text '<last unique prepared phrase>'`.
+Without `--through-text`, the start anchor selects one whole chunk. Anchors are literal,
+case-sensitive substrings of prepared narration, not raw Markdown; missing, repeated,
+reversed or out-of-range selections fail before login. Anchors crossing chunk boundaries
+are unsupported: choose a shorter unique phrase or an explicit range. A diagram's single
+connector is not a representative diagram; select its complete meaningful sequence.
+
+After inspecting and authorizing the sample selection, render without `--dry-run`:
+
+```powershell
+python $workflow preview --record $run --resource $resource --name opening --stem 01-glava-1 --chunks 1-4
+```
+
+Samples use `preview-<stem>-<name>.smoke.mp3`, reuse the renderer's verified PCM, and never
+replace canonical tracks; names colliding with configured chapters are rejected.
+Each receipt retains the selected text, chunk numbers and audio
+hash. Repeating an identical completed preview verifies it without synthesis. A changed
+selection requires a new name; adding a sample clears the previous approval. Interrupted
+unreceipted previews are not trusted: use a new name or remove only that unverified sample.
+
+Only after a human actually listens and approves the complete requested scope:
+
+```powershell
+python $workflow approve --record $run --resource $resource --listened --scope-approved
+python $engine --project .\book.json --resource $resource --all
+python $workflow verify --record $run --resource $resource
+```
+
+The approval records the operator's declaration, bound to the plan and preview receipts;
+it does **not** prove listening occurred, authorize an upload, or gate the legacy renderer.
+The agent/human must use the plan's exact inputs, output directory, voice, rate and budget
+for the render command. Pass any overrides used during planning explicitly again.
+Changing a source, profile, renderer or resolved endpoint invalidates the run plan.
+Paths are local absolute paths; moving a project requires a new plan.
+
+`verify` never authenticates, synthesizes, retags or changes audio/manifests/cache.
+It writes a dated `*.verification.json` report and its hash/link into the run record,
+referencing the existing completion manifests rather than replacing their authority.
+It checks ID3v2.3 and all renderer-owned tags, receipt bytes, a duration difference
+strictly below 0.25 seconds, and full ffmpeg decoding. Missing, extra, stale, corrupt
+or incompletely decoded outputs fail the batch with nonzero exit status. Non-canonical
+smoke files are excluded; configured tracks, unexpected ordinary MP3s and orphan
+manifests are not. For a subset,
+use an output directory containing exactly that selection.
+
+The endpoint is still resolved to compare its hash, even for offline operations;
+`--resource`/`--endpoint` resolution makes no Azure call. No raw endpoint or token is
+stored in the run record. Full prepared text is stored, so keep records ignored.
+Verifying a previously rendered album is allowed without a recorded preview approval:
+the report distinguishes mechanical success from approval, and never certifies listening.
+Reports describe their dated check, not a permanent guarantee; rerun verification after
+changes. Preview/audio and JSON publication are separate atomic writes, not a transaction.
 
 ### Troubleshooting
 
@@ -322,7 +409,9 @@ the in-memory token. Only transmit material the user may legitimately narrate.
 
 Run `python -m unittest discover -s <reference-directory> -p 'test_*.py'`.
 Tests cover the example, probe classification, configuration, range selection, cache,
-stale audio, source races, smoke isolation, and encode/tag failures. Also compare the
+stale audio, source races, smoke isolation, encode/tag failures, frozen plans, preview
+anchors, approval invalidation and complete-album verification. The workflow tests use
+fake TTS and real local MP3 encoding/decoding; no test claims a human listened. Also compare the
 complete target corpus's ordered prepared text/chunks after cleaner changes.
 
 Current coverage is English/Russian Markdown and public-Azure Speech custom domains,
@@ -340,6 +429,11 @@ a later 18-track, roughly 3.4-hour retelling established audible source boundari
 Preview failures grounded typed retry/splitting and voice-specific probing.
 The Hegel migration grounded external configuration and exact ranges, source-aware
 resume, chunk checkpoints, pre-publication tagging, and preservation of notation.
+Its completed Russian chapters 1-29 comprised 29 tracks and 22.20 hours: every track
+passed manifest/metadata/duration/full-decode checks, and an identical rerun skipped all
+29 without synthesis. Four representative samples received human approval; subsequent
+positive listening feedback covered several passages, not the whole album.
+The measured 536-character budget belonged to that voice/endpoint/rate probe, not all runs.
 These are limited observed workflows, not claims about all books or speech services.
 
 Each revision must add a rule grounded in an observed failure/user contract, remove an
@@ -370,3 +464,10 @@ distinct failure mode appears; never file or transmit the report without consent
   inflection, separate replacement/cache-refresh controls, numeric identifiers distinct
   from fallback track ordinals, and a shared validated H1 reader. Regression tests enforce
   these rules. Live narration quality remains subject to preview listening.
+- 2026-10-03 follow-up: **add/regroup**, grounded in that completed run's session-only
+  verifier, passage-selection helper, and run records. `workflow.py` makes those steps
+  reusable without changing renderer/cache identity. A connector-only first diagram
+  sample grounds complete-passage preview selection; the published production result
+  grounds the bounded evidence above. Review regressions preserve literal paths and
+  configured aliases sharing a source; summaries distinguish record updates from
+  no-synthesis dry runs. Human listening remains outside software proof.

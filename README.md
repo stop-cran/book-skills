@@ -28,7 +28,9 @@ and listening checks, not merely a changed language flag.
   AI-generated summary from the original text).
   Book-owned JSON configuration, exact chapter ranges, per-chunk checkpoints, and
   source/settings/audio-bound completion manifests prevent stale or partial recordings
-  from being treated as complete.
+  from being treated as complete. The companion `reference\workflow.py` adds durable
+  narration plans, passage-selected listening previews, approval records and complete
+  album verification without changing the renderer's cache identity.
 
 ## Typical workflow
 
@@ -42,9 +44,14 @@ and listening checks, not merely a changed language flag.
 3. Keep one engine checkout, set `BOOK_SKILLS_ROOT`, and create a book-owned JSON
    configuration using the audiobook skill's worked example. Call its shared
    `reference\synthesize.py --project <book.json>`; no script copying or CONFIG editing
-   is needed. Dry-run the exact selection, probe the voice/endpoint/rate, listen to a
-   smoke test, then generate tagged MP3s and completion manifests. The probe is empirical,
-   not a guarantee of the service limit.
+   is needed. Dry-run the exact selection and probe the voice/endpoint/rate. The probe
+   is empirical, not a guarantee of the service limit.
+4. Before batch generation, use `reference\workflow.py` to retain the prepared plan and
+   representative previews in the book's ignored output directory. Inspect the selected
+   text, render and listen to the samples, then record the scope/preview approval.
+5. Render tagged MP3s and completion manifests with the plan's exact settings, then use
+   `workflow.py verify` to check the exact album, tags, duration and full decoding.
+   Mechanical verification never certifies human listening.
 
 Each skill is independently useful — you don't need the PDF source to run
 `audiobook-from-markdown` against Markdown you already have, and you don't need to make an
