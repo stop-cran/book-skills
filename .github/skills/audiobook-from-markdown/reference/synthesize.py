@@ -11,19 +11,18 @@ concatenating per-chunk MP3s) avoids MP3 frame-boundary gaps, so the result is
 seamless.
 
 Authentication uses your Azure login (`az login` / Azure CLI credential); no
-keys are used or stored. Configure the book-specific values in the CONFIG
-section below, then override the endpoint/voice/resource via environment
-variables or CLI flags (never hardcode a resource name -- it's user-specific).
+keys are used or stored. Use --project book.json for book-specific configuration,
+then override the endpoint/voice/resource via environment variables or CLI flags.
 
 Examples
 --------
-    python synthesize.py --probe-max-chars            # measure this voice's request-size limit
-    python synthesize.py --dry-run --all              # inspect text prep, no API calls
-    python synthesize.py --all                        # every file in text/
-    python synthesize.py 03-chapter-3 --limit-chunks 2 # smoke test one file
+    python synthesize.py --project book.json --probe-max-chars
+    python synthesize.py --project book.json --dry-run --all
+    python synthesize.py --project book.json --all
+    python synthesize.py --project book.json 03-chapter-3 --limit-chunks 2
 
 --probe-max-chars saves a recommended limit per voice, endpoint and --rate to
-tts-limits.json in the project root (the folder above this script's), and every
+tts-limits.json beside the book configuration, and every
 later run with the same voice, endpoint and --rate uses it; --max-chars N or
 $TTS_MAX_CHARS overrides it. Don't edit chunk_text.DEFAULT_BUDGET instead.
 Offline tests: python test_synthesize.py
@@ -32,6 +31,8 @@ Offline tests: python test_synthesize.py
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import glob
 import hashlib
 import io
 import json
@@ -44,6 +45,7 @@ import tempfile
 import time
 import wave
 import xml.sax.saxutils as saxutils
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
@@ -52,14 +54,15 @@ import requests
 from urllib3.exceptions import ReadTimeoutError
 
 from chunk_text import DEFAULT_BUDGET, DEFAULT_PAUSES, Chunk, chunk_segments, split_sentences
-from clean_text import parse_markdown
+from clean_text import Segment, document_heading, parse_markdown, roman_to_int, strip_inline_decoration
+from book_project import BookProject, chapter_number, read_project, select_intro_and_sections
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEXT_DIR = REPO_ROOT / "text"
 AUDIO_DIR = REPO_ROOT / "audio"
 
 # =============================================================================
-# CONFIG -- fill in for your book. Everything below this section is generic.
+# Legacy CONFIG compatibility. New projects use --project, not edited source.
 # =============================================================================
 
 LANGUAGE = "ru"  # must match a key in clean_text.HEADING_PATTERNS / chunk_text.LANGUAGE_ABBREVIATIONS
@@ -75,14 +78,56 @@ DEFAULT_VOICE = "ru-RU-Lev:MAI-Voice-2"
 # project if you like, just keep it consistent with your README/SKILL usage.
 ENV_PREFIX = "TTS"
 
-# Every file to narrate, in album order -- the position in this list doubles
-# as the ID3 track number (see the ID3 tagging convention in SKILL.md: 00 is
-# reserved for preface/introduction, continuing sequentially through every
-# chapter and appendix). Defaults to every .md file in TEXT_DIR sorted by
-# name (matching a "00-preface, 01-chapter-1, ..." naming convention) --
-# override with an explicit list if your files aren't named that way, or to
-# exclude reference/bibliography files that shouldn't be narrated.
+# Legacy discovery; project configuration owns source selection for new books.
+# Numeric filename prefixes determine track numbers, otherwise enumeration.
 NARRATED_STEMS = sorted(p.stem for p in TEXT_DIR.glob("*.md")) if TEXT_DIR.exists() else []
+PROJECT: BookProject | None = None
+ID3_COMMENT = ""
+
+
+def configure_project(path: Path) -> None:
+    global PROJECT, TEXT_DIR, AUDIO_DIR, LIMITS_PATH, NARRATED_STEMS
+    global LANGUAGE, XML_LANG, VOICE, ENV_PREFIX, ID3_ARTIST, ID3_ALBUM, ID3_YEAR, ID3_COMMENT
+    PROJECT = read_project(path)
+    data, root = PROJECT.data, PROJECT.path.parent
+    TEXT_DIR = (root / data["text_dir"]).resolve()
+    AUDIO_DIR = (root / data["out_dir"]).resolve()
+    LIMITS_PATH = root / "tts-limits.json"
+    NARRATED_STEMS = list(PROJECT.sources)
+    LANGUAGE, XML_LANG = data["language"], data["xml_lang"]
+    ENV_PREFIX = data.get("env_prefix", "TTS")
+    VOICE = os.environ.get(f"{ENV_PREFIX}_VOICE", data["voice"])
+    metadata = data["metadata"]
+    ID3_ARTIST, ID3_ALBUM, ID3_YEAR = (metadata[k] for k in ("artist", "album", "year"))
+    ID3_COMMENT = metadata.get("comment", "")
+
+
+def source_path(stem: str) -> Path:
+    return PROJECT.sources[stem] if PROJECT else TEXT_DIR / f"{stem}.md"
+
+
+def load_segments(stem: str) -> list[Segment]:
+    md = source_path(stem).read_text(encoding="utf-8")
+    options = {}
+    if PROJECT:
+        if stem in PROJECT.sections:
+            md = select_intro_and_sections(md, PROJECT.sections[stem])
+        narration = PROJECT.data.get("narration", {})
+        options = {k: narration[k] for k in ("notation", "tables", "strip_section_numbers", "fenced_blocks",
+                                           "roman_references")
+                   if k in narration}
+        if "reference_cases" in narration:
+            options["reference_cases"] = narration["reference_cases"]
+    document_heading(md)
+    segments = parse_markdown(md, LANGUAGE, **options)
+    if not segments or segments[0].kind != "title" or not segments[0].text.strip():
+        raise ValueError(f"{stem}: narration must start with a nonempty H1 heading")
+    if PROJECT:
+        prefix = narration.get("spoken_track_prefix", "").replace("{number}", str(PROJECT.tracks[stem]))
+        segments[0] = Segment("title", prefix + segments[0].text)
+        if stem == NARRATED_STEMS[0] and narration.get("opening"):
+            segments.insert(1, Segment("para", narration["opening"]))
+    return segments
 
 # =============================================================================
 # Track title derivation (ID3 TIT2) -- generic Roman-numeral-to-Arabic-digit
@@ -91,22 +136,6 @@ NARRATED_STEMS = sorted(p.stem for p in TEXT_DIR.glob("*.md")) if TEXT_DIR.exist
 # clean_text.spoken_heading() (e.g. "Глава третья"). The two intentionally
 # differ -- see the ID3 tagging convention table in SKILL.md.
 # =============================================================================
-
-_ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
-_ROMAN_RE = re.compile(r"^[IVXLCDM]+$")
-
-
-def _roman_to_arabic(roman: str) -> int | None:
-    if not _ROMAN_RE.match(roman):
-        return None
-    total = 0
-    prev = 0
-    for ch in reversed(roman):
-        value = _ROMAN_VALUES[ch]
-        total += -value if value < prev else value
-        prev = max(prev, value)
-    return total
-
 
 def track_title(stem: str) -> str:
     """Derive the ID3 track title from the .md file's own H1 heading (single
@@ -123,13 +152,12 @@ def track_title(stem: str) -> str:
     """
     from clean_text import HEADING_PATTERNS
 
-    first_line = (TEXT_DIR / f"{stem}.md").read_text(encoding="utf-8").splitlines()[0]
-    heading = first_line.lstrip("#").strip()
+    heading = strip_inline_decoration(document_heading(source_path(stem).read_text(encoding="utf-8")))
     for pattern, lead_word, _ordinals in HEADING_PATTERNS.get(LANGUAGE, []):
         m = pattern.match(heading)
         if m:
             numeral, rest = m.group(1), m.group(2)
-            arabic = _roman_to_arabic(numeral)
+            arabic = roman_to_int(numeral)
             if arabic is not None:
                 rest = f" {rest}" if rest else ""
                 return f"{lead_word} {arabic}.{rest}"
@@ -146,16 +174,23 @@ ENDPOINT_TEMPLATE = "https://{resource}.cognitiveservices.azure.com/tts/cognitiv
 
 
 def resolve_endpoint(resource: str | None = None, endpoint: str | None = None) -> str | None:
-    endpoint = endpoint or os.environ.get(f"{ENV_PREFIX}_ENDPOINT")
-    if endpoint:
-        return endpoint
-    resource = resource or os.environ.get(f"{ENV_PREFIX}_RESOURCE")
-    if resource:
-        return ENDPOINT_TEMPLATE.format(resource=resource)
-    return None
+    if not endpoint:
+        endpoint = (ENDPOINT_TEMPLATE.format(resource=resource) if resource
+                    else os.environ.get(f"{ENV_PREFIX}_ENDPOINT"))
+    if not endpoint and os.environ.get(f"{ENV_PREFIX}_RESOURCE"):
+        endpoint = ENDPOINT_TEMPLATE.format(resource=os.environ[f"{ENV_PREFIX}_RESOURCE"])
+    if not endpoint:
+        return None
+    parts = urlsplit(endpoint)
+    if (parts.scheme != "https" or not (parts.hostname or "").endswith(".cognitiveservices.azure.com")
+            or parts.username or parts.password or parts.query or parts.fragment or parts.port
+            or parts.path != "/tts/cognitiveservices/v1"):
+        raise ValueError("Endpoint must be an HTTPS Azure Cognitive Services custom-domain TTS URL "
+                         "ending in /tts/cognitiveservices/v1, without credentials or query parameters")
+    return endpoint
 
 
-ENDPOINT = resolve_endpoint()
+ENDPOINT: str | None = None
 VOICE = os.environ.get(f"{ENV_PREFIX}_VOICE", DEFAULT_VOICE)
 
 
@@ -273,15 +308,10 @@ TAIL_SILENCE_MS = 600
 
 def make_token_provider():
     """Return a callable that yields a cached, auto-refreshing AAD token."""
-    from azure.identity import AzureCliCredential, DefaultAzureCredential
+    from azure.identity import AzureCliCredential
 
-    try:
-        # process_timeout=30: the default 10s can expire when `az` is cold,
-        # especially on Windows.
-        credential = AzureCliCredential(process_timeout=30)
-        credential.get_token(SCOPE)  # validate up front
-    except Exception:
-        credential = DefaultAzureCredential(process_timeout=30)
+    credential = AzureCliCredential(process_timeout=30)
+    credential.get_token(SCOPE)
 
     cache = {"token": None, "expires": 0.0}
 
@@ -349,7 +379,10 @@ def _pcm_from_wav(data: bytes) -> bytes:
                     f"unexpected PCM format: {wav.getframerate()}Hz "
                     f"{wav.getnchannels()}ch {wav.getsampwidth() * 8}bit"
                 )
-            return wav.readframes(wav.getnframes())
+            pcm = wav.readframes(wav.getnframes())
+            if len(pcm) != wav.getnframes() * SAMPLE_WIDTH:
+                raise PermanentSynthesisError("Truncated WAV response")
+            return pcm
     except (wave.Error, EOFError) as exc:
         raise PermanentSynthesisError(f"response is not a WAV file: {exc}") from exc
 
@@ -377,7 +410,7 @@ def synth_pcm(
     not minutes) -- if a failure persists at this size, the caller
     (synth_pcm_resilient) falls back to splitting the text instead of waiting
     here indefinitely, since that has proven the more effective fix (see
-    SKILL.md, "Why split-and-retry, not just more retries").
+    SKILL.md, "Troubleshooting").
 
     Raises TransientExhaustionError only when every attempt failed with a
     transient HTTP status (408/429/500/502/503/504), a read timeout or a
@@ -428,8 +461,13 @@ def synth_pcm(
                 f"TTS request failed after {max_retries} attempts: {detail}", resp.status_code
             )
         retry_after = resp.headers.get("Retry-After")
-        base = float(retry_after) if retry_after else min(2 ** attempt, 12)
-        time.sleep(base * (0.8 + 0.4 * random.random()))
+        base = min(2 ** attempt, 12)
+        if retry_after:
+            try:
+                base = float(retry_after)
+            except ValueError:
+                base = max(0, parsedate_to_datetime(retry_after).timestamp() - time.time())
+        time.sleep(max(0, base) * (1 + 0.2 * random.random()))
     raise PermanentSynthesisError("exhausted retries")  # unreachable: loop always returns or raises above
 
 
@@ -479,6 +517,8 @@ def synth_pcm_resilient(
     try:
         return synth_pcm(ssml, get_token, session, max_retries=max_retries)
     except (TransientExhaustionError, PermanentSynthesisError) as exc:
+        if exc.status == 429:
+            raise
         if isinstance(exc, PermanentSynthesisError) and exc.status != 413:
             raise
         if len(text) <= MIN_SPLIT_CHARS:
@@ -530,9 +570,7 @@ def _ffmpeg_exe() -> str:
 
 
 def encode_mp3(wav_bytes: bytes, out_path: Path, bitrate: str = "128k") -> None:
-    # Encode to a temp file and atomically rename on success, so an
-    # interrupted encode never leaves a truncated MP3 at the resumable output
-    # path (which the skip-if-exists resume logic would then treat as done).
+    # Never replace an older recording with an interrupted encode.
     tmp_path = out_path.with_name(out_path.name + ".tmp")
     cmd = [
         _ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
@@ -547,19 +585,130 @@ def encode_mp3(wav_bytes: bytes, out_path: Path, bitrate: str = "128k") -> None:
     os.replace(tmp_path, out_path)
 
 
+def file_hash(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def json_hash(value) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def pipeline_hash() -> str:
+    root = Path(__file__).resolve().parent
+    return json_hash({name: file_hash(root / name) for name in (
+        "synthesize.py", "clean_text.py", "chunk_text.py", "book_project.py",
+    )})
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def write_json(path: Path, data: dict) -> None:
+    atomic_write(path, (json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def cached_pcm(text, get_token, session, voice, rate, cache_dir: Path, force: bool) -> bytes:
+    key = json_hash({"text": text, "voice": voice, "rate": rate, "xml_lang": XML_LANG,
+                     "endpoint": endpoint_id(ENDPOINT), "pipeline": pipeline_hash()})
+    wav_path = cache_dir / f"{key}.wav"
+    receipt = cache_dir / f"{key}.json"
+    if not force and wav_path.exists() and receipt.exists():
+        metadata = json.loads(receipt.read_text(encoding="utf-8"))
+        if metadata.get("sha256") != file_hash(wav_path):
+            raise ValueError(f"Corrupt PCM cache: {wav_path}; remove that entry or use --force --refresh-cache")
+        pcm = _pcm_from_wav(wav_path.read_bytes())
+        if not pcm:
+            raise ValueError(f"Empty PCM cache: {wav_path}; remove that entry or use --force --refresh-cache")
+        return pcm
+    if not force and (wav_path.exists() or receipt.exists()):
+        print(f"    incomplete cache entry {key[:12]}; synthesizing it again", flush=True)
+    pcm = synth_pcm_resilient(text, get_token, session, voice, rate)
+    if not pcm:
+        raise PermanentSynthesisError("TTS returned empty audio")
+    atomic_write(wav_path, _wrap_wav(pcm))
+    write_json(receipt, {"sha256": file_hash(wav_path)})
+    return pcm
+
+
+def render_request(stem, chunks, voice, rate, max_chars, track, total, source_sha) -> dict:
+    return {
+        "source": source_path(stem).name, "source_sha256": source_sha,
+        "pipeline_sha256": pipeline_hash(), "chunks_sha256": json_hash([
+            [c.text, c.pre_pause_ms, c.kind] for c in chunks
+        ]),
+        "chunk_count": len(chunks), "characters": sum(len(c.text) for c in chunks),
+        "voice": voice, "language": XML_LANG, "rate": rate, "max_chars": max_chars,
+        "endpoint_id": endpoint_id(ENDPOINT), "title": track_title(stem),
+        "artist": ID3_ARTIST, "album": ID3_ALBUM, "year": ID3_YEAR, "comment": ID3_COMMENT,
+        "track": track, "total": total,
+    }
+
+
+def manifest_path(out_path: Path) -> Path:
+    return out_path.with_suffix(".manifest.json")
+
+
+def verified_existing(out_path: Path, request: dict) -> bool:
+    receipt = manifest_path(out_path)
+    if not out_path.exists() and not receipt.exists():
+        return False
+    if out_path.is_file() and receipt.is_file():
+        try:
+            saved = json.loads(receipt.read_text(encoding="utf-8"))
+            if (saved.get("version") == 1 and saved.get("request") == request
+                    and saved.get("audio", {}).get("sha256") == file_hash(out_path)
+                    and out_path.stat().st_size > 0):
+                return True
+        except (OSError, ValueError, AttributeError) as exc:
+            raise ValueError(f"Cannot validate {receipt}: {exc}; use --force or another output directory") from exc
+    raise ValueError(f"Stale, unverified, or incomplete output: {out_path}; "
+                     "use --force to regenerate, or another output directory")
+
+
+def publish_file(stem, chunks, out_path, get_token, voice, rate, request, force=False) -> float:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=out_path.parent, prefix=out_path.stem + ".", suffix=".pending.mp3")
+    os.close(fd)
+    pending = Path(name)
+    try:
+        seconds = synthesize_file(chunks, pending, get_token, voice, rate,
+                                  out_path.parent / ".cache" / stem, force)
+        tag_mp3(pending, stem, request["track"], request["total"])
+        if file_hash(source_path(stem)) != request["source_sha256"]:
+            raise ValueError(f"{stem}: source changed during synthesis; completed audio not published")
+        if pipeline_hash() != request["pipeline_sha256"]:
+            raise ValueError("Engine changed during synthesis; completed audio not published")
+        receipt = {"version": 1, "request": request,
+                   "audio": {"sha256": file_hash(pending), "bytes": pending.stat().st_size, "seconds": seconds}}
+        os.replace(pending, out_path)
+        write_json(manifest_path(out_path), receipt)
+        return seconds
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 # --- ID3 tagging ---------------------------------------------------------------
 
 def tag_mp3(path: Path, stem: str, track: int, total: int) -> None:
     """Apply ID3v2.3 tags: title (per-file), artist/album/year/genre (fixed
-    book-level values from CONFIG), and a zero-padded track number (see the
+    book-level values from the project), and a zero-padded track number (see the
     ID3 tagging convention in SKILL.md)."""
-    from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TRCK
+    from mutagen.id3 import COMM, ID3, ID3NoHeaderError, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TRCK
 
     try:
         tags = ID3(path)
     except ID3NoHeaderError:
         tags = ID3()
-    for frame in ("TIT2", "TPE1", "TPE2", "TALB", "TRCK", "TDRC", "TCON"):
+    for frame in ("TIT2", "TPE1", "TPE2", "TALB", "TRCK", "TDRC", "TCON", "COMM"):
         tags.delall(frame)
     tags.add(TIT2(encoding=3, text=track_title(stem)))
     tags.add(TPE1(encoding=3, text=ID3_ARTIST))
@@ -568,14 +717,15 @@ def tag_mp3(path: Path, stem: str, track: int, total: int) -> None:
     tags.add(TRCK(encoding=3, text=f"{track:02d}/{total}"))
     tags.add(TDRC(encoding=3, text=ID3_YEAR))
     tags.add(TCON(encoding=3, text=ID3_GENRE))
+    if ID3_COMMENT:
+        tags.add(COMM(encoding=3, lang="rus" if LANGUAGE == "ru" else "eng", desc="", text=ID3_COMMENT))
     tags.save(path, v2_version=3)
 
 
 # --- per-file driver ------------------------------------------------------------
 
 def load_chunks(stem: str, max_chars: int = DEFAULT_BUDGET) -> list[Chunk]:
-    md_path = TEXT_DIR / f"{stem}.md"
-    segments = parse_markdown(md_path.read_text(encoding="utf-8"), LANGUAGE)
+    segments = load_segments(stem)
     return chunk_segments(segments, budget=max_chars, language=LANGUAGE)
 
 
@@ -596,13 +746,21 @@ def synthesize_file(
     get_token,
     voice: str,
     rate: str | None,
+    cache_dir: Path | None = None,
+    force: bool = False,
 ) -> float:
     session = requests.Session()
     pcm = bytearray(_silence(HEAD_SILENCE_MS))
     for index, chunk in enumerate(chunks, 1):
         if chunk.pre_pause_ms:
             pcm += _silence(chunk.pre_pause_ms)
-        pcm += synth_pcm_resilient(chunk.text, get_token, session, voice, rate)
+        if cache_dir is None:
+            audio = synth_pcm_resilient(chunk.text, get_token, session, voice, rate)
+        else:
+            audio = cached_pcm(chunk.text, get_token, session, voice, rate, cache_dir, force)
+        if not audio:
+            raise PermanentSynthesisError(f"Empty audio for chunk {index}; no complete output published")
+        pcm += audio
         print(f"    chunk {index}/{len(chunks)} ({chunk.kind}, {len(chunk.text)} chars) ok", flush=True)
     pcm += _silence(TAIL_SILENCE_MS)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -636,7 +794,7 @@ def probe_texts(stems: list[str], lengths: list[int]) -> tuple[list[str], list[s
     size = 0
     for stem in stems:
         used.append(stem)
-        for seg in parse_markdown((TEXT_DIR / f"{stem}.md").read_text(encoding="utf-8"), LANGUAGE):
+        for seg in load_segments(stem):
             if seg.kind != "title":
                 for word in seg.text.split():
                     words.append(word)
@@ -737,17 +895,68 @@ def resolve_inputs(args) -> list[tuple[str, Path, int]]:
         stems = []
         for raw_pattern in args.inputs:
             pattern = _normalize_input(raw_pattern)
-            matches = [s for s in NARRATED_STEMS if pattern in s] or [pattern]
+            paths = (sorted(Path(p).resolve() for p in glob.glob(raw_pattern))
+                     if raw_pattern.lower().endswith(".md") or any(c in raw_pattern for c in ("/", "\\"))
+                     else [])
+            if paths:
+                matches = []
+                for path in paths:
+                    known = next((s for s in NARRATED_STEMS if source_path(s).resolve() == path), None)
+                    if known is not None:
+                        matches.append(known)
+                        continue
+                    if (not PROJECT or not PROJECT.data.get("allow_external_inputs")
+                            or getattr(args, "chapters", None)):
+                        raise ValueError(f"File is outside the configured selection: {path}")
+                    if path.suffix.lower() != ".md" or not path.is_file():
+                        raise ValueError(f"Markdown source not found: {path}")
+                    if path.stem in PROJECT.sources:
+                        raise ValueError(f"External file conflicts with an existing output stem: {path.stem}")
+                    PROJECT.sources[path.stem] = path
+                    PROJECT.tracks[path.stem] = max(PROJECT.tracks.values()) + 1
+                    NARRATED_STEMS.append(path.stem)
+                    matches.append(path.stem)
+            elif pattern in NARRATED_STEMS:
+                matches = [pattern]
+            elif any(c in raw_pattern for c in ("/", "\\")):
+                paths = {Path(p).resolve() for p in glob.glob(raw_pattern)}
+                matches = [s for s in NARRATED_STEMS if source_path(s).resolve() in paths]
+            elif any(c in pattern for c in "*?["):
+                matches = [s for s in NARRATED_STEMS if fnmatch.fnmatchcase(s, pattern)]
+            else:
+                matches = [s for s in NARRATED_STEMS if pattern in s]
+                if len(matches) > 1:
+                    raise ValueError(f"Ambiguous input {raw_pattern!r}; use an exact stem or explicit glob")
+            if not matches:
+                raise ValueError(f"No source matched {raw_pattern!r}")
             stems.extend(matches)
-    return [(s, out_dir / f"{s}.mp3", NARRATED_STEMS.index(s) if s in NARRATED_STEMS else -1) for s in stems]
+    if len(set(stems)) != len(stems):
+        raise ValueError("Inputs select duplicate chapters")
+    tracks = PROJECT.tracks if PROJECT else {
+        s: int(m[1]) if (m := re.match(r"^(\d+)-", s)) else i
+        for i, s in enumerate(NARRATED_STEMS, 1)
+    }
+    if getattr(args, "chapters", None):
+        match = re.fullmatch(r"(\d+)-(\d+)", args.chapters)
+        if not match or int(match[1]) > int(match[2]):
+            raise ValueError("--chapters must be an inclusive range, e.g. 1-29")
+        required = set(range(int(match[1]), int(match[2]) + 1))
+        numbered = {s: n for s in stems if (n := chapter_number(s)) is not None}
+        missing = required - set(numbered.values())
+        if missing:
+            raise ValueError(f"Missing requested chapter number(s): {sorted(missing)}")
+        stems = [s for s in stems if numbered.get(s) in required]
+    return [(s, out_dir / f"{s}.mp3", tracks[s]) for s in stems]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--project", type=Path, help="book-owned JSON configuration; paths are relative to this file")
+    parser.add_argument("--chapters", help="inclusive numeric filename range, e.g. 1-29; missing chapters are errors")
     parser.add_argument("inputs", nargs="*", help="stems or substrings, e.g. '03-chapter-3' (default: --all)")
     parser.add_argument("--all", action="store_true", help="every file in NARRATED_STEMS")
-    parser.add_argument("--out-dir", default=str(AUDIO_DIR))
-    parser.add_argument("--voice", default=VOICE,
+    parser.add_argument("--out-dir", default=None)
+    parser.add_argument("--voice", default=None,
                         help=f"TTS voice (default: ${ENV_PREFIX}_VOICE if set, else {DEFAULT_VOICE})")
     parser.add_argument("--resource", default=None, help=f"Foundry custom-domain resource name; or set ${ENV_PREFIX}_RESOURCE")
     parser.add_argument("--endpoint", default=None, help=f"full TTS endpoint URL; or set ${ENV_PREFIX}_ENDPOINT")
@@ -755,6 +964,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="chunk only; write .txt, no API calls")
     parser.add_argument("--limit-chunks", type=int, default=None, help="synthesize only the first N chunks (smoke test)")
     parser.add_argument("--force", action="store_true", help="re-render even if the output MP3 already exists")
+    parser.add_argument("--refresh-cache", action="store_true",
+                        help="with --force, repeat TTS instead of reusing verified chunk PCM")
     parser.add_argument("--tag-only", action="store_true", help="skip synthesis; just (re-)apply ID3 tags to existing MP3s")
     parser.add_argument("--max-chars", type=int, default=None,
                         help=f"longest text per TTS request (default: ${ENV_PREFIX}_MAX_CHARS, else the limit "
@@ -768,6 +979,23 @@ def main() -> int:
                         help=f"comma-separated request lengths for --probe-max-chars (default {DEFAULT_PROBE_LENGTHS})")
     args = parser.parse_args()
 
+    if args.project:
+        try:
+            configure_project(args.project)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+    args.out_dir = args.out_dir or str(AUDIO_DIR)
+    args.voice = args.voice or VOICE
+    if not args.voice.startswith(XML_LANG + "-"):
+        parser.error("--voice locale must match the project's xml_lang")
+    if args.limit_chunks is not None and args.limit_chunks <= 0:
+        parser.error("--limit-chunks must be positive")
+    if args.refresh_cache and (not args.force or args.dry_run or args.tag_only):
+        parser.error("--refresh-cache requires --force and cannot be combined with --dry-run or --tag-only")
+    if args.all and args.inputs:
+        parser.error("--all cannot be combined with explicit inputs")
+    if args.tag_only and (args.dry_run or args.limit_chunks is not None):
+        parser.error("--tag-only cannot be combined with --dry-run or --limit-chunks")
     if not NARRATED_STEMS:
         parser.error(f"No .md files found under {TEXT_DIR} -- run pdf-to-markdown first, "
                       f"or set NARRATED_STEMS explicitly for your project.")
@@ -777,14 +1005,22 @@ def main() -> int:
         ignored = [flag for flag, given in (
             ("--dry-run", args.dry_run), ("--tag-only", args.tag_only), ("--force", args.force),
             ("--limit-chunks", args.limit_chunks is not None), ("--max-chars", args.max_chars is not None),
+            ("--refresh-cache", args.refresh_cache),
         ) if given]
         if ignored:
             parser.error(f"--probe-max-chars can't be combined with {', '.join(ignored)}; run the probe on its own")
 
     global ENDPOINT
-    ENDPOINT = resolve_endpoint(args.resource, args.endpoint)
-    jobs = resolve_inputs(args)
+    catalog = set(NARRATED_STEMS)
+    try:
+        ENDPOINT = resolve_endpoint(args.resource, args.endpoint)
+        jobs = resolve_inputs(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     total = len(NARRATED_STEMS)
+
+    def album_total(stem: str) -> int:
+        return len(catalog) if stem in catalog else total
 
     def request_limit() -> tuple[int, str]:
         try:
@@ -805,21 +1041,32 @@ def main() -> int:
             t_chunks += nc
             t_chars += nch
         print(f"\nTotals: {n_files} files, {t_chunks} chunks, {t_chars} chars")
-        for line in oversized_chunks(loaded, max_chars):
+        too_long = oversized_chunks(loaded, max_chars)
+        for line in too_long:
             print(f"  OVER the {max_chars}-char limit: {line}")
-        return 0
+        pipes = sum("|" in c.text for _, chunks in loaded for c in chunks)
+        slashes = sum(len(re.findall(r"(?<=\w)/(?=\w)", c.text)) for _, chunks in loaded for c in chunks)
+        print(f"Narration lint: {pipes} stray-pipe chunk(s), {slashes} literal '/'")
+        return 1 if too_long else 0
 
     if args.tag_only:
+        if any("CHANGE ME" in value for value in (ID3_ARTIST, ID3_ALBUM, ID3_YEAR)):
+            parser.error("Configure real metadata with --project before tagging")
         tagged = 0
+        missing = 0
         for stem, out_path, track in jobs:
             if out_path.exists():
-                tag_mp3(out_path, stem, track, total)
+                tag_mp3(out_path, stem, track, album_total(stem))
+                # Retagging is not synthesis evidence. An old receipt cannot
+                # certify changed metadata or a newly changed manuscript.
+                manifest_path(out_path).unlink(missing_ok=True)
                 print(f"  tagged: {out_path.name}")
                 tagged += 1
             else:
-                print(f"  MISSING (skip tag): {out_path.name}")
+                print(f"  MISSING: {out_path.name}")
+                missing += 1
         print(f"\nTagged {tagged} file(s).")
-        return 0
+        return 1 if missing else 0
 
     if not ENDPOINT:
         parser.error(
@@ -837,7 +1084,7 @@ def main() -> int:
         if not lengths or min(lengths) <= 0:
             parser.error(f"--probe-lengths: expected comma-separated positive integers, got {raw_lengths!r}")
         stems = [stem for stem, _o, _t in jobs]
-        missing = [stem for stem in stems if not (TEXT_DIR / f"{stem}.md").exists()]
+        missing = [stem for stem in stems if not source_path(stem).exists()]
         if missing:
             parser.error(f"--probe-max-chars: no such file(s) under {TEXT_DIR}: {', '.join(missing)}")
         texts, used = probe_texts(stems, lengths)
@@ -903,10 +1150,13 @@ def main() -> int:
         return 0
 
     max_chars, max_source = request_limit()
+    if any("CHANGE ME" in value for value in (ID3_ARTIST, ID3_ALBUM, ID3_YEAR)):
+        parser.error("Configure real metadata with --project before synthesis")
     # Plan every file before authenticating: skip finished files, load and
     # (for a smoke test) cut the chunks, and check exactly those chunks
     # against the limit. The loop below sends these same lists, never a re-read.
     plan: list[tuple[str, Path, int, list[Chunk] | None, Exception | None]] = []
+    records: dict[str, dict] = {}
     for stem, out_path, track in jobs:
         # A --limit-chunks smoke test NEVER writes to the canonical out_path:
         # it writes a distinct *.smoke.mp3 file instead, and is never tagged.
@@ -914,24 +1164,34 @@ def main() -> int:
         # full (un-limited) run checks for "already done" and skips -- silently
         # shipping a truncated file tagged as if it were the complete chapter.
         target_path = out_path.with_name(f"{out_path.stem}.smoke{out_path.suffix}") if args.limit_chunks else out_path
-        if target_path.exists() and not args.force and not args.limit_chunks:
-            plan.append((stem, target_path, track, None, None))
-            continue
         try:
+            source_sha = file_hash(source_path(stem))
             chunks = load_chunks(stem, max_chars)
-        except Exception as exc:  # reported in order below, like any other per-file failure
+            if args.limit_chunks:
+                chunks = chunks[:args.limit_chunks]
+            records[stem] = render_request(stem, chunks, args.voice, args.rate, max_chars,
+                                          track, album_total(stem), source_sha)
+            if file_hash(source_path(stem)) != source_sha:
+                raise ValueError(f"{stem}: source changed during planning")
+            if not args.force and not args.limit_chunks and verified_existing(target_path, records[stem]):
+                plan.append((stem, target_path, track, None, None))
+                continue
+        except (OSError, ValueError, KeyError) as exc:
             plan.append((stem, target_path, track, None, exc))
             continue
-        if args.limit_chunks:
-            chunks = chunks[:args.limit_chunks]
         plan.append((stem, target_path, track, chunks, None))
 
+    errors = [(stem, error) for stem, _p, _t, _c, error in plan if error is not None]
+    if errors:
+        for stem, error in errors:
+            print(f"  FAILED: {stem}: {error}")
+        return 1
     too_long = oversized_chunks([(stem, chunks) for stem, _p, _t, chunks, _e in plan if chunks], max_chars)
     if too_long:
         parser.error(f"{len(too_long)} chunk(s) exceed the {max_chars}-char request limit ({max_source}); "
                      "titles are never split -- see SKILL.md, \"Troubleshooting\": " + "; ".join(too_long))
 
-    get_token = make_token_provider()
+    get_token = make_token_provider() if any(chunks is not None for _s, _p, _t, chunks, _e in plan) else None
     print(f"Synthesizing {len(jobs)} file(s) with {args.voice}, max {max_chars} chars ({max_source})\n  endpoint {ENDPOINT}")
     if max_source == "default":
         print(f"  WARNING: no saved request limit for {args.voice}"
@@ -941,21 +1201,22 @@ def main() -> int:
     failures: list[str] = []
     for stem, target_path, track, chunks, error in plan:
         if chunks is None and error is None:
-            print(f"  skip (exists): {target_path.name}")
-            tag_mp3(target_path, stem, track, total)
+            print(f"  skip (verified source, settings, and audio): {target_path.name}")
             continue
         print(f"  {stem} -> {target_path.name}")
         try:
             if error is not None:
                 raise error
-            seconds = synthesize_file(chunks, target_path, get_token, args.voice, args.rate)
             if args.limit_chunks:
+                seconds = synthesize_file(chunks, target_path, get_token, args.voice, args.rate,
+                                          target_path.parent / ".cache" / stem, args.refresh_cache)
                 print(f"  smoke-test output only ({target_path.name}) -- not tagged, "
                       "not the final file; delete it before a full run if you like")
             else:
-                tag_mp3(target_path, stem, track, total)
+                seconds = publish_file(stem, chunks, target_path, get_token, args.voice, args.rate,
+                                       records[stem], args.refresh_cache)
             print(f"  done: {target_path.name} ({seconds / 60:.1f} min)")
-        except Exception as exc:  # keep going; report at the end
+        except (OSError, ValueError, RuntimeError) as exc:
             failures.append(f"{stem}: {exc}")
             print(f"  FAILED: {stem}: {exc}")
     if failures:
@@ -967,4 +1228,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     sys.exit(main())

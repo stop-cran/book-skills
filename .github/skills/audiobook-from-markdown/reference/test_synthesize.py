@@ -116,6 +116,9 @@ class Project(unittest.TestCase):
             ("TEXT_DIR", self.text_dir), ("AUDIO_DIR", self.audio_dir), ("LIMITS_PATH", self.limits),
             ("NARRATED_STEMS", self.stems), ("VOICE", s.DEFAULT_VOICE), ("ENDPOINT", None),
             ("make_token_provider", provider), ("encode_mp3", encode), ("tag_mp3", self.tagged),
+            ("PROJECT", None), ("LANGUAGE", "ru"), ("XML_LANG", "ru-RU"), ("ENV_PREFIX", "TTS"),
+            ("ID3_ARTIST", "Test author"), ("ID3_ALBUM", "Test book"), ("ID3_YEAR", "2026"),
+            ("ID3_COMMENT", ""),
         ):
             patcher = mock.patch.object(s, name, value)
             patcher.start()
@@ -448,11 +451,11 @@ class ProbeCommand(Project):
         self.endpoint(up_to(650))
         os.environ[f"{s.ENV_PREFIX}_MAX_CHARS"] = "abc"
         self.assertEqual(self.probe()[0], 0)
-        self.assertEqual(self.main("--tag-only")[0], 0)
+        self.assertEqual(self.main("--tag-only")[0], 1)
         self.assertEqual(self.main("--dry-run")[0], 2)
         del os.environ[f"{s.ENV_PREFIX}_MAX_CHARS"]
         self.limits.write_text(json.dumps({self.key(): 500}), encoding="utf-8")
-        self.assertEqual(self.main("--tag-only")[0], 0)
+        self.assertEqual(self.main("--tag-only")[0], 1)
         code, out = self.main("--dry-run", "--endpoint", ENDPOINT_A)
         self.assertEqual(code, 2)
         self.assertIn("fix or delete that entry", out)
@@ -502,14 +505,15 @@ class Run(Project):
         self.assertTrue((self.audio_dir / "01-a.smoke.mp3").exists())
         self.tagged.assert_not_called()
         code, out = self.main("--endpoint", ENDPOINT_A, "--max-chars", "50", "02-b")
-        self.assertEqual(code, 0, out)
-        self.assertIn("skip (exists)", out)
+        self.assertEqual(code, 1, out)
+        self.assertIn("Stale, unverified, or incomplete", out)
 
-    def test_unreadable_file_is_reported_in_order(self):
+    def test_unknown_input_stops_before_any_synthesis(self):
         self.write("01-a", chapter())
         code, out = self.main("--endpoint", ENDPOINT_A, "01-a", "99-missing")
-        self.assertEqual(code, 1)
-        self.assertLess(out.index("done: 01-a.mp3"), out.index("FAILED: 99-missing"))
+        self.assertEqual(code, 2)
+        self.assertIn("No source matched", out)
+        self.assertEqual(self.tts.sent, [])
 
     def test_size_errors_and_read_timeouts_split_the_text(self):
         for name, over in (("413", lambda: Response(413)), ("read timeout", read_timeout),
@@ -518,7 +522,7 @@ class Run(Project):
                 self.write("01-a", chapter(paragraphs=1, words=60))
                 self.tts.sent.clear()
                 self.endpoint(up_to(200, over))
-                code, out = self.main("--endpoint", ENDPOINT_A, "--force")
+                code, out = self.main("--endpoint", ENDPOINT_A, "--force", "--refresh-cache")
                 self.assertEqual(code, 0, out)
                 self.assertIn("retry-split", out)
 
@@ -552,7 +556,7 @@ class DryRun(Project):
     def test_flags_an_over_long_title(self):
         self.write("01-a", chapter(title="A heading that is far too long to fit in one short request"))
         code, out = self.main("--dry-run", "--max-chars", "50")
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertIn("OVER the 50-char limit: 01-a chunk 1 (title", out)
 
 
@@ -566,8 +570,11 @@ class WorkedExample(Project):
     def test_matches_skill_md(self):
         section = SKILL_MD.read_text(encoding="utf-8").split("## Worked example walkthrough", 1)[1]
         source, printed, prepared = re.findall(r"```[a-z]*\n(.*?)```", section, re.S)[:3]
+        config = json.loads(re.findall(r"```json\n(.*?)```", section, re.S)[0])
+        config_path = self.root / "book.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
         self.write("01-glava-1", source)
-        code, out = self.main("--dry-run", "01-glava-1")
+        code, out = self.main("--project", str(config_path), "--dry-run", "01-glava-1")
         self.assertEqual(code, 0, out)
         self.assertEqual(out.strip(), printed.strip())
         self.assertEqual((self.audio_dir / "01-glava-1.txt").read_text(encoding="utf-8").strip(), prepared.strip())

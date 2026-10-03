@@ -7,10 +7,10 @@ chaptered, metadata-tagged MP3 audiobook via Azure neural TTS.
 They were extracted and generalized from a real, complete project: producing a ~6.5-hour
 Russian-language audiobook of Vladimir Propp's *Морфология волшебной сказки* (Morphology of
 the Folktale) from a scanned PDF — see each `SKILL.md` for the concrete numbers, gotchas, and
-decisions that came out of that run. Everything here is language-agnostic by design, with the
-Russian-specific bits factored out into clearly-marked, swappable pieces (abbreviation lists,
-spoken-ordinal tables, a morphological spell-checker) so the same pipeline works for English,
-Russian, or another language with a bit of per-language configuration.
+decisions that came out of that run. The audiobook engine now also consumes the English
+and Russian Hegel synopsis configurations without being copied into either book. English
+and Russian are supported; other languages require grounded cleaner/abbreviation rules
+and listening checks, not merely a changed language flag.
 
 ## Skills
 
@@ -26,6 +26,9 @@ Russian, or another language with a bit of per-language configuration.
   audio-player navigation, and audible in-recording navigation conventions (spoken
   chapter/section heading at the start of each track, a clear spoken marker separating an
   AI-generated summary from the original text).
+  Book-owned JSON configuration, exact chapter ranges, per-chunk checkpoints, and
+  source/settings/audio-bound completion manifests prevent stale or partial recordings
+  from being treated as complete.
 
 ## Typical workflow
 
@@ -36,9 +39,12 @@ Russian, or another language with a bit of per-language configuration.
 2. (Optional) Have Copilot CLI draft a short preface and/or per-chapter summaries, reviewed by
    two independent-model rubber-duck subagents (different vendors, to reduce single-model
    bias) before they're inserted into the narrated text.
-3. Run `audiobook-from-markdown` on the `text/` folder to get tagged `.mp3` files in an
-   `audio/` folder. With a new voice or endpoint, first run its `--probe-max-chars` step
-   once: it measures the endpoint's per-request length limit and saves it for later runs.
+3. Keep one engine checkout, set `BOOK_SKILLS_ROOT`, and create a book-owned JSON
+   configuration using the audiobook skill's worked example. Call its shared
+   `reference\synthesize.py --project <book.json>`; no script copying or CONFIG editing
+   is needed. Dry-run the exact selection, probe the voice/endpoint/rate, listen to a
+   smoke test, then generate tagged MP3s and completion manifests. The probe is empirical,
+   not a guarantee of the service limit.
 
 Each skill is independently useful — you don't need the PDF source to run
 `audiobook-from-markdown` against Markdown you already have, and you don't need to make an

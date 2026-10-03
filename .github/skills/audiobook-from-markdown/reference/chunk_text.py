@@ -50,7 +50,7 @@ LANGUAGE_ABBREVIATIONS = {
     },
     "en": {
         "mr", "mrs", "ms", "dr", "prof", "st", "vs", "etc", "e.g", "i.e",
-        "fig", "vol", "no", "ch", "sec", "pp",
+        "fig", "vol", "no", "ch", "sec", "pp", "cf", "al", "jr", "sr", "ca", "cap", "esp",
     },
 }
 
@@ -80,6 +80,8 @@ def _looks_like_nonfinal(fragment: str, abbrevs: set[str]) -> bool:
     """True if `fragment` ends in a period that is not a sentence end."""
     if fragment.endswith(("!", "?")):
         return False
+    if re.search(r"[\])][.!?][\"'\u2019\u201d\u00bb]*$", fragment):
+        return False
     tokens = fragment.split()
     if not tokens:
         return False
@@ -98,8 +100,10 @@ def _looks_like_nonfinal(fragment: str, abbrevs: set[str]) -> bool:
     # this convention -- harmless no-op otherwise.
     if core and _ROMAN_CHARS_RE.fullmatch(core):
         return True
-    # Trailing digit (page/citation reference, e.g. "p. 42." / "с. 42.").
-    if re.search(r"\d$", core):
+    # Only a bare page abbreviation protects a trailing number, not every
+    # sentence ending in a numeric result or a closed citation.
+    if (re.search(r"\d$", core) and len(tokens) > 1
+            and tokens[-2].rstrip(".").lower() in {"p", "pp", "с", "стр"}):
         return True
     return False
 
@@ -137,6 +141,8 @@ def split_paragraph(text: str, budget: int = DEFAULT_BUDGET, language: str = "ru
     """Split one paragraph into <=budget parts at sentence boundaries; a single
     sentence over budget is cut at a word boundary, or mid-word for a word over
     budget (_hard_split)."""
+    if budget <= 0:
+        raise ValueError("Chunk budget must be positive")
     if len(text) <= budget:
         return [text]
     parts: list[str] = []
@@ -169,6 +175,8 @@ def chunk_segments(
     language: str = "ru",
 ) -> list[Chunk]:
     """Turn segments into synthesis chunks with structural pause hints."""
+    if budget <= 0:
+        raise ValueError("Chunk budget must be positive")
     pauses = pauses or DEFAULT_PAUSES
     chunks: list[Chunk] = []
     first = True
