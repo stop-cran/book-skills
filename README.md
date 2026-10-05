@@ -1,19 +1,27 @@
 # book-skills
 
-Two general-purpose [Copilot CLI](https://github.com/github/copilot-cli) skills for turning a
-scanned/PDF book into a clean, reusable Markdown corpus, and turning that Markdown into a
-chaptered, metadata-tagged MP3 audiobook via Azure neural TTS.
+General-purpose [Copilot CLI](https://github.com/github/copilot-cli) skills for preparing
+book text, consulting edition-specific sources, and producing chaptered, metadata-tagged
+MP3 audiobooks via Azure neural TTS.
 
-They were extracted and generalized from a real, complete project: producing a ~6.5-hour
+The PDF and audiobook skills were extracted from a real, complete project: producing a ~6.5-hour
 Russian-language audiobook of Vladimir Propp's *Морфология волшебной сказки* (Morphology of
 the Folktale) from a scanned PDF — see each `SKILL.md` for the concrete numbers, gotchas, and
 decisions that came out of that run. The audiobook engine now also consumes the English
 and Russian Hegel synopsis configurations without being copied into either book. English
 and Russian are supported; other languages require grounded cleaner/abbreviation rules
 and listening checks, not merely a changed language flag.
+The source-consultation skill grew from edition-specific Hegel reviews and a separate
+retrieval workbench; it does not treat the audiobook workflow as its source evidence.
 
 ## Skills
 
+- **[`source-consultation`](.github/skills/source-consultation/SKILL.md)** — discover
+  and inspect edition-specific evidence, compare earlier/later passages, and preserve
+  the difference between retrieved leads, consulted transcriptions and checked editions.
+  Uses a separate `source-workbench` checkout for deterministic retrieval; the skill
+  retains scope/rights judgment, independent textual inspection and the repair loop.
+  It is independently useful and does not require PDF conversion or audiobook generation.
 - **[`pdf-to-markdown`](.github/skills/pdf-to-markdown/SKILL.md)** — extract a PDF book into
   clean, per-section Markdown files suitable for narration or any other reuse, with a
   targeted-patch-and-verify workflow for fixing OCR/extraction artifacts, plus validation
@@ -52,6 +60,28 @@ and listening checks, not merely a changed language flag.
 5. Render tagged MP3s and completion manifests with the plan's exact settings, then use
    `workflow.py verify` to check the exact album, tags, duration and full decoding.
    Mechanical verification never certifies human listening.
+
+## Agent discovery
+
+In Copilot CLI, `/add-dir <book-skills-checkout>` loads the trusted `.github` skills;
+use `/skills` to inspect availability. Referencing this README alone does not install
+a skill. For other agents, follow the linked `SKILL.md` explicitly.
+
+For source consultation, a book can keep an ignored `.source-workbench.local.json`:
+
+```json
+{
+  "book_skills_root": "C:\\checkouts\\book-skills",
+  "workbench_root": "C:\\checkouts\\source-workbench",
+  "config": "C:\\checkouts\\source-workbench\\workbench.local.toml"
+}
+```
+
+These are placeholders; supply inspected absolute paths, not credentials. This routing
+note is read by the agent, not passed to the CLI. If unavailable, supply
+`BOOK_SKILLS_ROOT`, `SOURCE_WORKBENCH_ROOT` and `SOURCE_WORKBENCH_CONFIG` explicitly.
+The runtime repository may require separate access; a public skill does not grant it.
+Keep source-containing evidence in an ignored/private consultation directory.
 
 Each skill is independently useful — you don't need the PDF source to run
 `audiobook-from-markdown` against Markdown you already have, and you don't need to make an
