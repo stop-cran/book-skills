@@ -82,15 +82,21 @@ before consuming JSON. PowerShell variables do not persist across separate tool 
    inputs, not necessarily an active index. `status --summary` checks the selected local
    snapshot, not service readiness; plain `status` preserves the complete locator list.
    Do not treat a synopsis, commentary, mixed OCR page, or synthetic fixture as primary
-   text just because it was retrieved.
-2. For a known locus use `show source-id::locator --neighbors 1`. Use exact search for
-   a known literal phrase and lexical search for word leads. `search --brief` reduces
-   output to identity/scores and labeled passage prefixes; it does not supply complete
-   evidence or shrink hosted payloads. For a conceptual
-   paraphrase or cross-language lead, consider hybrid search only after resolving the
-   transmission boundary below. Do not force a keyword failure into a quotation repair.
-3. Read the **complete** relevant passage and continuation. For a return in a changed
-   role, find each side independently if one broad query fails, then use `compare`.
+   text just because it was retrieved. In mixed material, distinguish the author's text
+   from editorial apparatus before attributing a claim; the source label alone cannot.
+2. Start with the actual citation when one exists: for a known locus use
+   `show source-id::locator --neighbors 1`, using an ID observed in the snapshot.
+   Use exact search for a known literal phrase and local lexical search for available
+   word leads, even when the question is conceptual. Consider hybrid search and optional
+   reranking for paraphrase/cross-language discovery or additional leads, only after
+   resolving the transmission boundary below. This is a choice of tools, not a required
+   ladder through every mode; a lexical success need not be rerun through hosted search.
+   `search --brief` supplies labeled passage prefixes, not complete evidence or smaller
+   hosted payloads. Do not force a keyword failure into a quotation repair.
+3. Read the **complete** relevant passage and continuation. Check the actual returned
+   IDs and text, not the requested neighbor count, to decide whether the argument is
+   complete; look up a missing continuation explicitly. For a return in a changed role,
+   find each side independently if one broad query fails, then use `compare`.
    Name the earlier determination, later function, what is retained, and what warrants
    the change. Mere identical vocabulary, analogy, recollection of an experience, or
    empirical repeatability is not that warrant. Counterevidence can defeat the proposed
@@ -105,6 +111,21 @@ before consuming JSON. PowerShell variables do not persist across separate tool 
    the original, not just the registry label. `verify` only proves internal extraction
    fidelity. If the original is unavailable, report transcription-level consultation
    and the unresolved printed-text check; do not call it printed-edition verification.
+
+### Comparing search methods
+
+When deliberately comparing modes, keep the query, snapshot, source filters, display
+limit and candidate budget fixed. Preserve returned IDs, enabled retrieval/reranking
+stages, latency and available model/cache/usage information, with any uncontrolled
+conditions stated. Separately record which complete passages were read and what useful
+evidence they added: a different ranking is not itself a better consultation.
+
+An indexed, in-scope locus missing from the displayed top results is a bounded retrieval
+miss, not absence from the corpus; use targeted lookup rather than forcing a ranked
+substitute. A small task-specific comparison does not establish general superiority
+or a speed guarantee. A hybrid-plus-reranking comparison does not isolate the
+contribution of vectors or reranking. Do not repeat paid comparisons merely to
+populate a report.
 
 ### Transmission and side effects
 
@@ -243,6 +264,17 @@ update a runtime regression and skill example together when their shared contrac
 
 ### Release log
 
+- 2026-10-05, release 2: **add/regroup**. The bilingual April 28 essay review
+  ([English revision](https://github.com/stop-cran/science-of-logic/commit/88fbd63))
+  grounds citation-first/local-lexical selection, explicit continuation checks and
+  bounded method comparisons. Two Wallace queries compared lexical search with hybrid
+  plus reranking. For the first, both found section 163 first; the latter also added
+  useful section 175. For the second, neither displayed sections 79-82 in its top five;
+  known-locus consultation supplied them.
+  Notes consumed the requested neighbor window, and Russian lexical retrieval also
+  returned editorial material. Rankings and full source evidence remain in the book's
+  private consultation record; this is not a held-out benchmark. Runtime locator,
+  context and output semantics remain canonical in the workbench README.
 - 2026-10-04, release 1: **add/regroup**. The fresh-agent discovery gap and the pilot's
   missed pair ground a shared consultation workflow over an existing deterministic core.
   The first-use tool exercise additionally grounded read-existing-index onboarding,
