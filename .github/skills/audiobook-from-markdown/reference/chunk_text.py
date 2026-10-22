@@ -110,6 +110,23 @@ def _looks_like_nonfinal(fragment: str, abbrevs: set[str]) -> bool:
 
 def split_sentences(text: str, language: str = "ru") -> list[str]:
     """Split text into sentences, rejoining abbreviation/initial false splits."""
+    if language == "ja":
+        text = text.strip()
+        pairs = {"「": "」", "『": "』", "（": "）", "(": ")"}
+        closers: list[str] = []
+        out: list[str] = []
+        start = 0
+        for index, char in enumerate(text):
+            if char in pairs:
+                closers.append(pairs[char])
+            elif closers and char == closers[-1]:
+                closers.pop()
+            if not closers and char in "。！？!?" and (index + 1 == len(text) or text[index + 1] not in "。！？!?"):
+                out.append(text[start:index + 1])
+                start = index + 1
+        if start < len(text):
+            out.append(text[start:])
+        return out
     abbrevs = LANGUAGE_ABBREVIATIONS.get(language, set())
     fragments = _SENTENCE_END_RE.split(text.strip())
     out: list[str] = []

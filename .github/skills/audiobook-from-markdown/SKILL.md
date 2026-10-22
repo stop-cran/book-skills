@@ -67,6 +67,35 @@ it requires `--force`. Without replacement authorization, stale or unverified ou
 
 ## Installation and configuration
 
+### Structured Japanese listening recordings
+
+`reference/listening.py` is a separate, bounded N5 dialogue/monologue adapter, not Japanese Markdown-book support.
+Run the owning content repository's complete schema validator first. The adapter freezes exact JSON packages, speaker voices,
+rates and spoken turns; reuses this engine's Entra authentication, retries and verified PCM checkpoints; and encodes mono
+32 kbps Ogg Opus once. Turn timings include natural TTS silence; short scripts must be revised, not padded to meet the duration.
+All final exports are fully decoded. Existing Russian/English book configuration and MP3 workflows are unchanged.
+
+Use an out-of-Git run directory. `plan --output <run-dir> --resource <resource> --subscription <id>
+--preview-ids <ids> --inputs <json-files>` makes no paid requests. Inspect the frozen `plan.json` and approve the exact
+preview selection before `render --plan <plan.json> --resource <resource> --subscription <id> --preview --allow-paid`.
+After someone actually listens, `approve --plan <plan.json> --listened --reviewed-on YYYY-MM-DD --note <coverage>`
+binds that preview approval to its exact recordings. A separately authorized full `render` omits `--preview` and still
+requires `--allow-paid`; it refuses stale or absent preview approval. Authentication always names the selected subscription.
+
+Every enabled final recording needs its own actual listening check of all answer-bearing facts and surrounding context:
+`approve --plan <plan.json> --id <passage-id> --listened --reviewed-on YYYY-MM-DD --note <coverage>`.
+`verify --plan <plan.json>` only checks the complete audio set and decoding, never pronunciation or linguistic correctness.
+After publication authorization, `export --plan <plan.json> --content-root <repository>` copies only approved compressed
+audio and its bound JSON metadata. It refuses a different pre-existing target recording. Then run the content validator,
+archive-budget check and manifest builder before committing. PCM caches, run plans and approval receipts remain outside Git.
+The approval flags record the author's declaration; an agent must not supply them on the strength of automated checks.
+
+Changes to the shared Japanese retry splitter or authentication helper change the existing four-module pipeline hash,
+so earlier audiobook render/cache identities require deliberate revalidation or regeneration; never silently overwrite them.
+Python sources in `reference` use LF line endings, which also participate in renderer identities. Normalize new files before
+freezing a plan. Retain the exact renderer sources with completed runs if later formatting changes would invalidate verification;
+do not rewrite a plan or approval receipt to disguise a renderer change.
+
 Keep one checkout of `stop-cran/book-skills`; set `BOOK_SKILLS_ROOT` to its location.
 Python 3.11 or newer is required. Dependencies are declared once in `reference/requirements.txt`. If a command
 fails for a missing dependency, install from that file. `imageio-ffmpeg` supplies ffmpeg;

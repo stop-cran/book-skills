@@ -306,11 +306,11 @@ TAIL_SILENCE_MS = 600
 
 # --- authentication ----------------------------------------------------------
 
-def make_token_provider():
+def make_token_provider(subscription: str | None = None):
     """Return a callable that yields a cached, auto-refreshing AAD token."""
     from azure.identity import AzureCliCredential
 
-    credential = AzureCliCredential(process_timeout=30)
+    credential = AzureCliCredential(process_timeout=30, **({"subscription": subscription} if subscription else {}))
     credential.get_token(SCOPE)
 
     cache = {"token": None, "expires": 0.0}
@@ -526,8 +526,9 @@ def synth_pcm_resilient(
         sentences = split_sentences(text, LANGUAGE)
         if len(sentences) > 1:
             mid = len(sentences) // 2
-            left = " ".join(sentences[:mid])
-            right = " ".join(sentences[mid:])
+            separator = "" if LANGUAGE == "ja" else " "
+            left = separator.join(sentences[:mid])
+            right = separator.join(sentences[mid:])
         else:
             cut = text.rfind(" ", 0, len(text) // 2 + 1)
             if cut <= 0:
